@@ -1,0 +1,49 @@
+{
+  "telegram": {
+    "api_id": 34402194,
+    "api_hash": "d9acdf58f9024ee52da7cb02b1058c43",
+    "session_name": "jarvis_session",
+    "channels": [
+      "@itpark_uz",
+      "@startupchoyxona",
+      "@mitcuz",
+      "@startupbaseuz",
+      "@UzVC_uz",
+      "@umedschannel",
+      "@aloqaventures",
+      "@uenteruz",
+      "@mostuzbekistan",
+      "@startupgarage_uz",
+      "@PresidentTechAward",
+      "@stanbasetech"
+    ]
+  },
+  "ollama": {
+    "base_url": "http://localhost:11434",
+    "model": "gemma3:4b"
+  },
+  "digest_max_age_days": 3,
+  "ai": {
+    "provider": "openai"
+  },
+  "gemini": {
+    "model": "gemini-2.0-flash"
+  },
+  "openai": {
+    "model": "openai/gpt-4o-mini",
+    "base_url": "https://openrouter.ai/api/v1"
+  },
+  "database": {
+    "path": "data/jarvis.db"
+  },
+  "delivery": {
+    "telegram_target": "-5102249943"
+  },
+  "debug": {
+    "reuse_analyzed_messages": true
+  },
+  "logging": {
+    "level": "INFO"
+  }
+}
+
