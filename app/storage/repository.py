@@ -684,12 +684,11 @@ class Repository:
                 WHERE pm.classification IS NOT NULL
                   AND pm.classification != 'other'
                   AND pm.is_duplicate = 0
-                  AND pm.importance_score >= ?
                   AND (? IS NULL OR datetime(rm.message_date) >= datetime(?))
                 ORDER BY pm.importance_score DESC, pm.id ASC
                 LIMIT ?;
                 """
-                params = (min_priority, cutoff_iso, cutoff_iso, limit)
+                params = (cutoff_iso, cutoff_iso, limit)
             else:
                 # Normal mode: exclude messages already used in digests
                 query = """
@@ -712,12 +711,11 @@ class Repository:
                   AND pm.classification != 'other'
                   AND pm.included_in_digest = 0
                   AND pm.is_duplicate = 0
-                  AND pm.importance_score >= ?
                   AND (? IS NULL OR datetime(rm.message_date) >= datetime(?))
                 ORDER BY pm.importance_score DESC, pm.id ASC
                 LIMIT ?;
                 """
-                params = (min_priority, cutoff_iso, cutoff_iso, limit)
+                params = (cutoff_iso, cutoff_iso, limit)
             
             cur.execute(query, params)
             rows = cur.fetchall()

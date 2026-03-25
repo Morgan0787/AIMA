@@ -126,13 +126,14 @@ class DigestBuilder:
             return rows, 3
 
         rows, threshold_used = _fetch_candidates(recent_days)
-        recency_used = recent_days
-        rows_loaded = len(rows)
+        rows_loaded_initial = len(rows)
 
         # If we don't have enough *recent* items, relax recency to 7 days.
         if len(rows) < 3 and recent_days < 7:
             rows, threshold_used = _fetch_candidates(7)
             recency_used = 7
+
+        rows_loaded = len(rows)
 
         logger.info("Digest threshold used: %d", threshold_used)
         logger.info("Digest recency window used: %d days", recency_used)
@@ -473,8 +474,9 @@ class DigestBuilder:
         # Log filtering summary
         logger.info("=== Digest Filtering Summary ===")
         logger.info("Load mode: %s", "REUSE (debug)" if reuse_mode else "NORMAL")
-        logger.info("Rows loaded: %d", rows_loaded)
-        logger.info("After recency filter: %d", rows_loaded)  # recency already applied in DB query
+        logger.info("Initial rows loaded: %d", rows_loaded_initial)
+        if rows_loaded_initial != rows_loaded:
+            logger.info("After recency fallback to %d days: %d", recency_used, rows_loaded)
         logger.info("After metadata parsing: %d", rows_loaded - rejections['metadata_missing'])
         logger.info("After relevance filter: %d", rows_loaded - rejections['metadata_missing'] - rejections['not_relevant'])
         logger.info("After priority filter: %d", rows_loaded - rejections['metadata_missing'] - rejections['not_relevant'] - rejections['priority_below_threshold'])
