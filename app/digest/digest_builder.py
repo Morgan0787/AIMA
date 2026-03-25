@@ -285,6 +285,197 @@ class DigestBuilder:
         
         return items, rejections
 
+    def _filter_items_relaxed(self, rows: List[Dict[str, Any]], threshold_used: int) -> tuple[List[DigestItem], Dict[str, int]]:
+        """
+        Apply relaxed filtering to digest candidates.
+        """
+        rejections = {
+            'metadata_missing': 0,
+            'not_relevant': 0,
+            'category_not_allowed': 0,
+            'priority_below_threshold': 0,
+            'summary_missing': 0,
+            'summary_too_short': 0,
+        }
+        
+        items: List[DigestItem] = []
+        relaxed_categories = set(SECTION_MAPPING.keys()) | {"other", "general", "news"}
+        
+        for row in rows:
+            metadata = self._safe_parse_metadata(row.get("metadata_json"))
+            if not metadata:
+                rejections['metadata_missing'] += 1
+                continue
+
+            # Relaxed relevance: allow items without explicit relevance flag
+            is_relevant = metadata.get("is_relevant", False)
+            if isinstance(is_relevant, bool):
+                relevant_bool = is_relevant
+            elif isinstance(is_relevant, str):
+                relevant_bool = is_relevant.strip().lower() in {"true", "1", "yes"}
+            else:
+                relevant_bool = True  # Default to relevant in relaxed mode
+            
+            # Only reject if explicitly marked as not relevant
+            if isinstance(is_relevant, str) and is_relevant.strip().lower() in {"false", "0", "no"}:
+                rejections['not_relevant'] += 1
+                continue
+
+            category = str(metadata.get("category", "other")).strip().lower()
+            if category not in relaxed_categories:
+                rejections['category_not_allowed'] += 1
+                continue
+
+            try:
+                importance = int(metadata.get("importance_score", 1))
+            except (TypeError, ValueError):
+                importance = 1
+
+            try:
+                priority = int(metadata.get("priority_score", 1))
+            except (TypeError, ValueError):
+                priority = 1
+            priority = max(1, min(10, priority))
+
+            # Relaxed priority: lower threshold by 2 points
+            relaxed_threshold = max(1, threshold_used - 2)
+            if priority < relaxed_threshold:
+                rejections['priority_below_threshold'] += 1
+                continue
+
+            summary = metadata.get("summary", "")
+            if not isinstance(summary, str):
+                summary = ""
+            summary = summary.strip()
+
+            if not summary:
+                rejections['summary_missing'] += 1
+                continue
+            # Relaxed summary length: minimum 10 chars OR 3 words
+            words = summary.split()
+            if len(summary) < 10 and len(words) < 3:
+                rejections['summary_too_short'] += 1
+                continue
+
+            channel_username = row.get("channel_username") or ""
+            if channel_username and not channel_username.startswith("@"):
+                channel_username = f"@{channel_username}"
+            if not channel_username:
+                channel_username = "@unknown"
+
+            raw_message_date = row.get("message_date")
+            message_date: Optional[datetime] = None
+            if isinstance(raw_message_date, datetime):
+                message_date = raw_message_date
+            elif isinstance(raw_message_date, str):
+                raw_dt = raw_message_date.strip()
+                if raw_dt:
+                    try:
+                        message_date = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
+                    except ValueError:
+                        message_date = None
+
+            items.append(
+                DigestItem(
+                    processed_message_id=int(row["processed_message_id"]),
+                    category=category,
+                    priority_score=priority,
+                    importance_score=importance,
+                    summary=summary,
+                    channel_username=channel_username,
+                    post_link=row.get("post_link"),
+                    message_date=message_date,
+                )
+            )
+        
+        return items, rejections
+
+    def _filter_items_fallback(self, rows: List[Dict[str, Any]]) -> tuple[List[DigestItem], Dict[str, int]]:
+        """
+        Final fallback filtering when strict and relaxed modes yield too few items.
+        Selects best recent analyzed rows based on priority_score, importance_score, and freshness.
+        """
+        rejections = {
+            'metadata_missing': 0,
+            'summary_missing': 0,
+            'summary_too_short': 0,
+        }
+        
+        items: List[DigestItem] = []
+        
+        for row in rows:
+            metadata = self._safe_parse_metadata(row.get("metadata_json"))
+            if not metadata:
+                rejections['metadata_missing'] += 1
+                continue
+
+            # Extract scores for ranking
+            try:
+                priority = int(metadata.get("priority_score", 1))
+            except (TypeError, ValueError):
+                priority = 1
+            priority = max(1, min(10, priority))
+            
+            try:
+                importance = int(metadata.get("importance_score", 1))
+            except (TypeError, ValueError):
+                importance = 1
+
+            # Extract category (allow any in fallback)
+            category = str(metadata.get("category", "other")).strip().lower()
+
+            summary = metadata.get("summary", "")
+            if not isinstance(summary, str):
+                summary = ""
+            summary = summary.strip()
+
+            if not summary:
+                rejections['summary_missing'] += 1
+                continue
+            # Minimum 10 chars OR 3 words
+            words = summary.split()
+            if len(summary) < 10 and len(words) < 3:
+                rejections['summary_too_short'] += 1
+                continue
+
+            channel_username = row.get("channel_username") or ""
+            if channel_username and not channel_username.startswith("@"):
+                channel_username = f"@{channel_username}"
+            if not channel_username:
+                channel_username = "@unknown"
+
+            raw_message_date = row.get("message_date")
+            message_date: Optional[datetime] = None
+            if isinstance(raw_message_date, datetime):
+                message_date = raw_message_date
+            elif isinstance(raw_message_date, str):
+                raw_dt = raw_message_date.strip()
+                if raw_dt:
+                    try:
+                        message_date = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
+                    except ValueError:
+                        message_date = None
+
+            items.append(
+                DigestItem(
+                    processed_message_id=int(row["processed_message_id"]),
+                    category=category,
+                    priority_score=priority,
+                    importance_score=importance,
+                    summary=summary,
+                    channel_username=channel_username,
+                    post_link=row.get("post_link"),
+                    message_date=message_date,
+                )
+            )
+        
+        # Sort by priority -> importance -> freshness (newest first)
+        items.sort(
+            key=lambda x: (-x.priority_score, -x.importance_score, -(x.message_date.timestamp() if x.message_date else 0))
+        )
+        
+        return items, rejections
+
     def build(self) -> DigestBuildResult:
         """
         Build a digest from repository candidates.
@@ -333,7 +524,7 @@ class DigestBuilder:
 
         rows, threshold_used = _fetch_candidates(recent_days)
         rows_loaded_initial = len(rows)
-        recency_used = recent_days
+        recency_used = recent_days  # Initialize before any fallback logic
 
         # If we don't have enough *recent* items, relax recency to 7 days.
         if len(rows) < 3 and recent_days < 7:
@@ -377,8 +568,27 @@ class DigestBuilder:
             logger.info("Too few items in strict mode, trying relaxed mode")
             relaxed_items, relaxed_rejections = self._filter_items_relaxed(rows, threshold_used)
             logger.info("Relaxed mode yielded %d items", len(relaxed_items))
-            # Use relaxed items if it gives us more usable content
-            if len(relaxed_items) > len(strict_items):
+            
+            # If relaxed mode still yields too few items, try fallback mode
+            if len(relaxed_items) < 3:
+                logger.info("Still too few items, trying fallback mode")
+                fallback_items, fallback_rejections = self._filter_items_fallback(rows)
+                logger.info("Fallback mode yielded %d items", len(fallback_items))
+                
+                # Use the mode with most items
+                if len(fallback_items) > len(relaxed_items) and len(fallback_items) > len(strict_items):
+                    parsed_items = fallback_items
+                    rejections = fallback_rejections
+                    logger.info("Using fallback mode results")
+                elif len(relaxed_items) > len(strict_items):
+                    parsed_items = relaxed_items
+                    rejections = relaxed_rejections
+                    logger.info("Using relaxed mode results")
+                else:
+                    parsed_items = strict_items
+                    rejections = strict_rejections
+                    logger.info("Using strict mode results (others didn't improve)")
+            elif len(relaxed_items) > len(strict_items):
                 parsed_items = relaxed_items
                 rejections = relaxed_rejections
                 logger.info("Using relaxed mode results")
@@ -627,6 +837,15 @@ class DigestBuilder:
 
         digest_text = "\n".join(lines).strip()
         included_ids = [it.processed_message_id for it in items]
+
+        # Log final results before publishing
+        logger.info("=== Digest Build Complete ===")
+        logger.info("Final digest items count: %d", len(items))
+        if len(items) > 0:
+            logger.info("Digest ready for publishing to Telegram")
+        else:
+            logger.info("No digest items - nothing to publish")
+        logger.info("============================")
 
         # Log filtering summary
         logger.info("=== Digest Filtering Summary ===")
