@@ -24,10 +24,11 @@
   },
   "digest_max_age_days": 3,
   "ai": {
-    "provider": "openai"
+    "provider": "gemini",
+    "model": "models/gemini-1.5-flash"
   },
   "gemini": {
-    "model": "gemini-2.0-flash"
+    "model": "models/gemini-1.5-flash"
   },
   "openai": {
     "model": "openai/gpt-4o-mini",

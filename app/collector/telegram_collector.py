@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from telethon import TelegramClient
@@ -110,11 +110,19 @@ class TelegramCollector:
 
         per_channel_counts: List[Tuple[str, int]] = []
         total_new = 0
+        now_utc = datetime.now(timezone.utc)
+        recent_cutoff = now_utc - timedelta(days=30)
+        has_history = False
 
         logger.info("Connecting to Telegram...")
         async with client:
             # `start()` will prompt for login (phone/code) if no session exists yet.
             await client.start()
+
+            # If there are any channels with known cursor (last_message_id),
+            # we consider the DB initialized and collect incrementally.
+            existing_channels = self.repo.get_all_channels()
+            has_history = any((ch.last_message_id or 0) > 0 for ch in existing_channels)
 
             for channel_username in self.channels:
                 if not channel_username:
@@ -135,9 +143,16 @@ class TelegramCollector:
                     entity = await client.get_entity(channel_username)
 
                     new_messages: List[Message] = []
-                    # `min_id` returns messages with id > min_id.
-                    async for msg in client.iter_messages(entity, min_id=last_message_id):
-                        new_messages.append(msg)
+                    if has_history and last_message_id > 0:
+                        # Incremental mode: only fetch what is newer than last cursor.
+                        # `min_id` returns messages with id > min_id.
+                        async for msg in client.iter_messages(entity, min_id=last_message_id):
+                            new_messages.append(msg)
+                    else:
+                        # Bootstrap mode (empty DB / new channel):
+                        # scan only the last 30 days to avoid historical backfill.
+                        async for msg in client.iter_messages(entity, offset_date=recent_cutoff):
+                            new_messages.append(msg)
 
                     # Telethon yields newest -> oldest; insert oldest -> newest.
                     new_messages.reverse()

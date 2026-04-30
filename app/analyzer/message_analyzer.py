@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List
 from ..core.config import get_config
@@ -56,7 +57,7 @@ class MessageAnalyzer:
     structured analysis back into the database.
     """
 
-    def __init__(self, batch_limit: int = 100) -> None:
+    def __init__(self, batch_limit: int = 50) -> None:
         self.repo = Repository()
         cfg = get_config()
         configured_provider = str(getattr(cfg.ai, "provider", "ollama") or "ollama").strip().lower()
@@ -361,7 +362,7 @@ class MessageAnalyzer:
         analyzed = 0
         failed = 0
 
-        for msg in messages:
+        for idx, msg in enumerate(messages):
             try:
                 prompt = self._build_prompt(msg.short_text or msg.cleaned_text)
                 raw_response = self.client.generate(prompt)
@@ -437,6 +438,10 @@ class MessageAnalyzer:
                     exc,
                 )
                 failed += 1
+            # Respect free-tier Google RPM limits by adding a delay
+            # between per-message generation requests.
+            if idx < len(messages) - 1:
+                time.sleep(4)
 
         total_analyzed_rows = self.repo.count_analyzed_processed_messages()
         total_metadata_rows = self.repo.count_processed_messages_with_metadata()

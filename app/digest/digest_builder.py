@@ -23,6 +23,7 @@ logger = get_logger(__name__)
 
 
 SECTION_ORDER = ["OPPORTUNITIES", "TOP NEWS", "JOBS", "EVENTS"]
+IMPORTANCE_THRESHOLD = 0.6
 
 SECTION_MAPPING = {
     "grant": "OPPORTUNITIES",
@@ -59,7 +60,7 @@ class DigestItem:
     processed_message_id: int
     category: str
     priority_score: int
-    importance_score: int
+    importance_score: float
     summary: str
     channel_username: str
     post_link: Optional[str]
@@ -146,6 +147,7 @@ class DigestBuilder:
             'metadata_missing': 0,
             'not_relevant': 0,
             'category_not_allowed': 0,
+            'importance_below_threshold': 0,
             'priority_below_threshold': 0,
             'summary_missing': 0,
             'summary_too_short': 0,
@@ -176,9 +178,14 @@ class DigestBuilder:
                 continue
 
             try:
-                importance = int(metadata.get("importance_score", 1))
+                importance = float(metadata.get("importance_score", 0.0))
             except (TypeError, ValueError):
-                importance = 1
+                importance = 0.0
+            importance = max(0.0, min(1.0, importance))
+
+            if importance < IMPORTANCE_THRESHOLD:
+                rejections['importance_below_threshold'] += 1
+                continue
 
             try:
                 priority = int(metadata.get("priority_score", 1))
@@ -250,6 +257,7 @@ class DigestBuilder:
             'metadata_missing': 0,
             'not_relevant': 0,
             'category_not_allowed': 0,
+            'importance_below_threshold': 0,
             'priority_below_threshold': 0,
             'summary_missing': 0,
             'summary_too_short': 0,
@@ -286,9 +294,14 @@ class DigestBuilder:
                 continue
 
             try:
-                importance = int(metadata.get("importance_score", 1))
+                importance = float(metadata.get("importance_score", 0.0))
             except (TypeError, ValueError):
-                importance = 1
+                importance = 0.0
+            importance = max(0.0, min(1.0, importance))
+
+            if importance < IMPORTANCE_THRESHOLD:
+                rejections['importance_below_threshold'] += 1
+                continue
 
             try:
                 priority = int(metadata.get("priority_score", 1))
@@ -379,9 +392,10 @@ class DigestBuilder:
             priority = max(1, min(10, priority))
             
             try:
-                importance = int(metadata.get("importance_score", 1))
+                importance = float(metadata.get("importance_score", 0.0))
             except (TypeError, ValueError):
-                importance = 1
+                importance = 0.0
+            importance = max(0.0, min(1.0, importance))
 
             # Extract category (allow any in fallback)
             category = str(metadata.get("category", "other")).strip().lower()
@@ -447,6 +461,7 @@ class DigestBuilder:
             'metadata_missing': 0,
             'not_relevant': 0,
             'category_not_allowed': 0,
+            'importance_below_threshold': 0,
             'priority_below_threshold': 0,
             'summary_missing': 0,
             'summary_too_short': 0,
@@ -514,6 +529,7 @@ class DigestBuilder:
             'metadata_missing': 0,
             'not_relevant': 0,
             'category_not_allowed': 0,
+            'importance_below_threshold': 0,
             'priority_below_threshold': 0,
             'summary_missing': 0,
             'summary_too_short': 0,
@@ -779,7 +795,7 @@ class DigestBuilder:
         # Log ranking score for selected items (readable, one line each).
         for it in items:
             logger.info(
-                "Digest item: id=%s channel=%s final_score=%.1f priority=%d importance=%d",
+                "Digest item: id=%s channel=%s final_score=%.1f priority=%d importance=%.2f",
                 it.processed_message_id,
                 it.channel_username,
                 it.final_score,
@@ -843,13 +859,15 @@ class DigestBuilder:
             logger.info("After recency fallback to %d days: %d", recency_used, rows_loaded)
         logger.info("After metadata parsing: %d", rows_loaded - rejections.get('metadata_missing', 0))
         logger.info("After relevance filter: %d", rows_loaded - rejections.get('metadata_missing', 0) - rejections.get('not_relevant', 0))
-        logger.info("After priority filter: %d", rows_loaded - rejections.get('metadata_missing', 0) - rejections.get('not_relevant', 0) - rejections.get('priority_below_threshold', 0))
+        logger.info("After importance filter: %d", rows_loaded - rejections.get('metadata_missing', 0) - rejections.get('not_relevant', 0) - rejections.get('importance_below_threshold', 0))
+        logger.info("After priority filter: %d", rows_loaded - rejections.get('metadata_missing', 0) - rejections.get('not_relevant', 0) - rejections.get('importance_below_threshold', 0) - rejections.get('priority_below_threshold', 0))
         logger.info("After summary validation: %d", len(parsed_items) + rejections.get('deduplication', 0) + rejections.get('channel_diversity', 0))
         logger.info("After dedup: %d", len(parsed_items) + rejections.get('channel_diversity', 0))
         logger.info("After diversity filter: %d", len(parsed_items))
         logger.info("Final items count: %d", len(items))
-        logger.info("Rejections: metadata_missing=%d, not_relevant=%d, category_not_allowed=%d, priority_below_threshold=%d, summary_missing=%d, summary_too_short=%d, deduplication=%d, channel_diversity=%d",
-                   rejections.get('metadata_missing', 0), rejections.get('not_relevant', 0), rejections.get('category_not_allowed', 0), 
+        logger.info("Rejections: metadata_missing=%d, not_relevant=%d, category_not_allowed=%d, importance_below_threshold=%d, priority_below_threshold=%d, summary_missing=%d, summary_too_short=%d, deduplication=%d, channel_diversity=%d",
+                   rejections.get('metadata_missing', 0), rejections.get('not_relevant', 0), rejections.get('category_not_allowed', 0),
+                   rejections.get('importance_below_threshold', 0),
                    rejections.get('priority_below_threshold', 0), rejections.get('summary_missing', 0), rejections.get('summary_too_short', 0),
                    rejections.get('deduplication', 0), rejections.get('channel_diversity', 0))
         logger.info("===============================")

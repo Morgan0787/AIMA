@@ -62,7 +62,7 @@ class MessageProcessor:
     cleaned results into `processed_messages`.
     """
 
-    def __init__(self, batch_limit: int = 500) -> None:
+    def __init__(self, batch_limit: int = 2000) -> None:
         self.repo = Repository()
         self.batch_limit = batch_limit
 

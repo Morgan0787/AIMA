@@ -29,6 +29,7 @@ class OpenAIClient(BaseAIClient):
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2,
+            "max_tokens": 2048,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
