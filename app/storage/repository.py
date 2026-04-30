@@ -387,6 +387,64 @@ class Repository:
         finally:
             conn.close()
 
+    def find_similar_processed_message(
+        self,
+        cleaned_text: str,
+        *,
+        lookback_limit: int = 1200,
+    ) -> Optional[ProcessedMessage]:
+        """
+        Find near-duplicate message by normalized text.
+
+        Aggressive mode for noisy Telegram content:
+        - lowercase
+        - collapse spaces
+        - remove punctuation/symbols/emojis
+        """
+        probe = " ".join((cleaned_text or "").lower().split()).strip()
+        if not probe:
+            return None
+
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT pm.*
+                FROM processed_messages pm
+                ORDER BY pm.id DESC
+                LIMIT ?;
+                """,
+                (lookback_limit,),
+            )
+            rows = cur.fetchall()
+            for row in rows:
+                candidate = " ".join(str(row["cleaned_text"] or "").lower().split()).strip()
+                if not candidate:
+                    continue
+                candidate_symbols_removed = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in candidate)
+                candidate_symbols_removed = " ".join(candidate_symbols_removed.split())
+                probe_symbols_removed = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in probe)
+                probe_symbols_removed = " ".join(probe_symbols_removed.split())
+                if candidate_symbols_removed == probe_symbols_removed:
+                    return ProcessedMessage(
+                        id=row["id"],
+                        raw_message_id=row["raw_message_id"],
+                        cleaned_text=row["cleaned_text"],
+                        short_text=row["short_text"],
+                        is_duplicate=bool(row["is_duplicate"]),
+                        duplicate_of_raw_message_id=row["duplicate_of_raw_message_id"],
+                        created_at=datetime.fromisoformat(row["created_at"]),
+                        classification=row["classification"],
+                        importance_score=row["importance_score"],
+                        metadata_json=row["metadata_json"],
+                        processed_at=datetime.fromisoformat(row["processed_at"]),
+                        included_in_digest=bool(row["included_in_digest"]),
+                    )
+            return None
+        finally:
+            conn.close()
+
     def insert_processed_message(
         self,
         raw_message_id: int,

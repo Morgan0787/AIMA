@@ -19,7 +19,7 @@ other
 Верни JSON строго в таком формате:
 {
   "category": "other",
-  "importance_score": 1,
+  "importance_score": 0.1,
   "actionability_score": 1,
   "priority_score": 1,
   "is_relevant": false,
@@ -28,7 +28,7 @@ other
 
 Правила:
 - category: только одно из допустимых значений
-- importance_score: целое число от 1 до 10
+- importance_score: число с плавающей точкой от 0.0 до 1.0
 - actionability_score: целое число от 1 до 10
 - priority_score: целое число от 1 до 10
 - is_relevant: true или false
@@ -60,7 +60,7 @@ other
 
 Если сообщение не даёт реальной пользы для стартапов, возможностей, карьеры, инвестиций или практических действий:
 - category = "other"
-- importance_score = 1
+- importance_score = 0.1
 - actionability_score = 1
 - priority_score = 1
 - is_relevant = false

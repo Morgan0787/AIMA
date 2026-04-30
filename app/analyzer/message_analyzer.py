@@ -56,7 +56,7 @@ class MessageAnalyzer:
     structured analysis back into the database.
     """
 
-    def __init__(self, batch_limit: int = 15) -> None:
+    def __init__(self, batch_limit: int = 100) -> None:
         self.repo = Repository()
         cfg = get_config()
         configured_provider = str(getattr(cfg.ai, "provider", "ollama") or "ollama").strip().lower()
@@ -97,7 +97,7 @@ class MessageAnalyzer:
         fallback_summary = self._fallback_summary_from_text(source_text)
         return {
             "category": "ecosystem_news",
-            "importance_score": 3,
+            "importance_score": 0.3,
             "actionability_score": 2,
             "priority_score": 3,
             "is_relevant": True,
@@ -234,7 +234,34 @@ class MessageAnalyzer:
         """
         Fill the classify prompt template with the message text.
         """
-        return self.prompt_template.replace("{{MESSAGE}}", message_text)
+        base_prompt = self.prompt_template.replace("{{MESSAGE}}", message_text)
+        # Hard requirement for Gemini/OpenRouter style providers: always return
+        # normalized importance_score on [0.0, 1.0].
+        strict_score_rule = (
+            "\n\nCRITICAL OUTPUT REQUIREMENT:\n"
+            '- For this response, "importance_score" MUST be a float from 0.0 to 1.0.\n'
+            "- Return ONLY valid JSON.\n"
+        )
+        return f"{base_prompt}{strict_score_rule}"
+
+    def _normalize_importance_score(self, value: Any) -> float:
+        """
+        Normalize model importance score into [0.0, 1.0].
+
+        Backward-compatible behavior:
+        - if score is in [0, 1], keep as is
+        - if score is in (1, 10], map to [0.1, 1.0] by dividing by 10
+        """
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return 0.3
+
+        if parsed <= 1.0:
+            return max(0.0, min(1.0, parsed))
+        if parsed <= 10.0:
+            return max(0.0, min(1.0, parsed / 10.0))
+        return 1.0
 
     def _validate_and_normalize(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -251,11 +278,9 @@ class MessageAnalyzer:
             result["category"] = cat
 
         # importance_score
-        try:
-            imp = int(data.get("importance_score", 1))
-        except (TypeError, ValueError):
-            imp = 1
-        result["importance_score"] = max(1, min(10, imp))
+        result["importance_score"] = self._normalize_importance_score(
+            data.get("importance_score", 0.3)
+        )
 
         # actionability_score
         try:
@@ -380,10 +405,9 @@ class MessageAnalyzer:
                     normalized["priority_score"] = max(1, min(10, int(normalized.get("priority_score", 3))))
                 except (TypeError, ValueError):
                     normalized["priority_score"] = 3
-                try:
-                    normalized["importance_score"] = max(1, min(10, int(normalized.get("importance_score", 3))))
-                except (TypeError, ValueError):
-                    normalized["importance_score"] = 3
+                normalized["importance_score"] = self._normalize_importance_score(
+                    normalized.get("importance_score", 0.3)
+                )
                 if "is_relevant" not in normalized:
                     normalized["is_relevant"] = True
                 normalized.setdefault("is_opportunity", False)

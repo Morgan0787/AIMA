@@ -15,9 +15,10 @@ Important:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Tuple
+from typing import Dict
 
 from .cleaner import clean_text, build_short_text
 from .deduplicator import compute_content_hash, are_probable_duplicates
@@ -26,6 +27,25 @@ from ..storage.repository import Repository
 
 
 logger = get_logger(__name__)
+
+HEURISTIC_KEYWORDS = [
+    "грант",
+    "фонд",
+    "вакансия",
+    "работа",
+    "хакатон",
+    "конкурс",
+    "apply",
+    "deadline",
+    "funding",
+    "opportunity",
+    "job",
+    "invest",
+    "startup",
+]
+
+EMOJI_AND_SYMBOLS_RE = re.compile(r"[^\w\s]+", flags=re.UNICODE)
+MULTISPACE_RE = re.compile(r"\s+")
 
 
 @dataclass
@@ -45,6 +65,15 @@ class MessageProcessor:
     def __init__(self, batch_limit: int = 500) -> None:
         self.repo = Repository()
         self.batch_limit = batch_limit
+
+    def _contains_heuristic_keyword(self, text: str) -> bool:
+        lowered = (text or "").lower()
+        return any(keyword in lowered for keyword in HEURISTIC_KEYWORDS)
+
+    def _normalize_for_dedup(self, text: str) -> str:
+        lowered = (text or "").lower()
+        no_symbols = EMOJI_AND_SYMBOLS_RE.sub(" ", lowered)
+        return MULTISPACE_RE.sub(" ", no_symbols).strip()
 
     def process(self) -> ProcessingStats:
         """
@@ -100,6 +129,7 @@ class MessageProcessor:
                     continue
 
                 short = build_short_text(cleaned)
+                normalized_cleaned = self._normalize_for_dedup(cleaned)
 
                 # Safety: do not double-insert if we already processed this ID.
                 if self.repo.processed_message_exists(int(raw.id)):
@@ -110,23 +140,43 @@ class MessageProcessor:
                     self.repo.mark_raw_message_processed(int(raw.id))
                     continue
 
+                # Coarse heuristic filter: skip obvious noise quickly.
+                # We still mark raw row as processed to avoid reprocessing it.
+                if not self._contains_heuristic_keyword(cleaned):
+                    logger.info(
+                        "Heuristic filter skipped raw message id=%s (no target keywords).",
+                        raw.id,
+                    )
+                    self.repo.mark_raw_message_processed(int(raw.id))
+                    continue
+
                 is_duplicate = False
                 duplicate_of_raw_id = None
 
                 # 1) Check for exact duplicate across all past messages.
                 existing = self.repo.find_duplicate_processed_message(cleaned)
+                if existing is None and normalized_cleaned and normalized_cleaned != cleaned:
+                    existing = self.repo.find_duplicate_processed_message(normalized_cleaned)
                 if existing is not None:
                     is_duplicate = True
                     duplicate_of_raw_id = existing.raw_message_id
                 else:
                     # 2) Check inside this batch using hash + fuzzy comparison.
-                    content_hash = compute_content_hash(cleaned)
+                    content_hash = compute_content_hash(normalized_cleaned or cleaned)
                     if content_hash in batch_texts:
                         other_raw_id = batch_texts[content_hash]
                         other_text = batch_cleaned_by_id.get(other_raw_id, "")
-                        if are_probable_duplicates(cleaned, other_text):
+                        if are_probable_duplicates(normalized_cleaned or cleaned, other_text):
                             is_duplicate = True
                             duplicate_of_raw_id = other_raw_id
+
+                if not is_duplicate:
+                    db_candidate = self.repo.find_similar_processed_message(
+                        normalized_cleaned or cleaned
+                    )
+                    if db_candidate is not None:
+                        is_duplicate = True
+                        duplicate_of_raw_id = db_candidate.raw_message_id
 
                 processed_at = datetime.utcnow()
                 self.repo.insert_processed_message(
@@ -146,9 +196,9 @@ class MessageProcessor:
                     duplicate_count += 1
 
                 # Save in batch trackers for later comparisons in this run.
-                content_hash = compute_content_hash(cleaned)
+                content_hash = compute_content_hash(normalized_cleaned or cleaned)
                 batch_texts.setdefault(content_hash, int(raw.id))
-                batch_cleaned_by_id[int(raw.id)] = cleaned
+                batch_cleaned_by_id[int(raw.id)] = normalized_cleaned or cleaned
 
             except Exception as exc:  # noqa: BLE001
                 # Never crash the whole run because of a single bad row.
