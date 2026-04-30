@@ -279,7 +279,7 @@ class Repository:
                 SELECT *
                 FROM raw_messages
                 WHERE is_processed = 0
-                ORDER BY id ASC
+                ORDER BY datetime(message_date) DESC, id DESC
                 LIMIT ?;
                 """,
                 (limit,),
@@ -519,6 +519,73 @@ class Repository:
         finally:
             conn.close()
 
+
+    def count_analyzed_processed_messages(self) -> int:
+        """
+        Count processed messages that already have analysis/classification.
+        """
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM processed_messages
+                WHERE classification IS NOT NULL;
+                """
+            )
+            row = cur.fetchone()
+            return int(row["total"] if row else 0)
+        finally:
+            conn.close()
+
+    def count_processed_messages_with_metadata(self) -> int:
+        """
+        Count processed messages that already have non-empty metadata_json.
+        """
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM processed_messages
+                WHERE metadata_json IS NOT NULL
+                  AND TRIM(metadata_json) != '';
+                """
+            )
+            row = cur.fetchone()
+            return int(row["total"] if row else 0)
+        finally:
+            conn.close()
+
+    def count_recent_analyzed_processed_messages(self, days: int = 7) -> int:
+        """
+        Count analyzed processed messages whose underlying raw message is recent.
+        """
+        cutoff = (datetime.utcnow() - timedelta(days=max(1, days))).isoformat(
+            timespec="seconds"
+        )
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM processed_messages pm
+                JOIN raw_messages rm ON rm.id = pm.raw_message_id
+                WHERE pm.classification IS NOT NULL
+                  AND pm.metadata_json IS NOT NULL
+                  AND TRIM(pm.metadata_json) != ''
+                  AND datetime(rm.message_date) >= datetime(?);
+                """,
+                (cutoff,),
+            )
+            row = cur.fetchone()
+            return int(row["total"] if row else 0)
+        finally:
+            conn.close()
+
     # -------- Digest helpers --------
 
     def get_last_published_digest(self) -> Optional[Dict[str, Any]]:
@@ -629,7 +696,7 @@ class Repository:
                   AND pm.included_in_digest = 0
                   AND pm.is_duplicate = 0
                   AND pm.importance_score >= 7
-                ORDER BY pm.importance_score DESC, pm.id ASC
+                ORDER BY datetime(rm.message_date) DESC, pm.importance_score DESC, pm.id DESC
                 LIMIT ?;
                 """,
                 (limit,),
@@ -690,7 +757,7 @@ class Repository:
                   AND pm.metadata_json IS NOT NULL
                   AND pm.metadata_json != ''
                   AND (? IS NULL OR datetime(rm.message_date) >= datetime(?))
-                ORDER BY pm.importance_score DESC, pm.id ASC
+                ORDER BY datetime(rm.message_date) DESC, pm.importance_score DESC, pm.id DESC
                 LIMIT ?;
                 """
                 params = (cutoff_iso, cutoff_iso, limit)
@@ -716,11 +783,12 @@ class Repository:
                   AND pm.classification != 'other'
                   AND pm.included_in_digest = 0
                   AND pm.is_duplicate = 0
+                  AND pm.importance_score >= ?
                   AND (? IS NULL OR datetime(rm.message_date) >= datetime(?))
                 ORDER BY pm.importance_score DESC, pm.id ASC
                 LIMIT ?;
                 """
-                params = (cutoff_iso, cutoff_iso, limit)
+                params = (float(min_priority), cutoff_iso, cutoff_iso, limit)
             
             cur.execute(query, params)
             rows = cur.fetchall()
@@ -732,6 +800,209 @@ class Repository:
             return [dict(row) for row in rows]
         finally:
             conn.close()
+
+
+    def get_analyzed_rows_for_opportunity_backfill(
+        self,
+        limit: int = 200,
+        max_age_days: int = 90,
+        include_existing: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return analyzed processed rows for opportunity extraction/backfill."""
+        cutoff_iso = (datetime.utcnow() - timedelta(days=max(1, max_age_days))).isoformat(timespec="seconds")
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            extra_join = "LEFT JOIN opportunities opp ON opp.processed_message_id = pm.id"
+            extra_where = ""
+            if not include_existing:
+                extra_where = "AND opp.id IS NULL"
+            cur.execute(
+                f"""
+                SELECT
+                    pm.id AS processed_message_id,
+                    pm.raw_message_id AS raw_message_id,
+                    pm.cleaned_text AS cleaned_text,
+                    pm.short_text AS short_text,
+                    pm.classification AS classification,
+                    pm.importance_score AS importance_score,
+                    pm.metadata_json AS metadata_json,
+                    pm.is_duplicate AS is_duplicate,
+                    rm.message_text AS message_text,
+                    rm.post_link AS post_link,
+                    rm.message_date AS message_date,
+                    ch.username AS channel_username,
+                    opp.id AS existing_opportunity_id,
+                    opp.status AS existing_opportunity_status,
+                    opp.metadata_json AS existing_opportunity_metadata_json
+                FROM processed_messages pm
+                JOIN raw_messages rm ON rm.id = pm.raw_message_id
+                LEFT JOIN channels ch ON ch.id = rm.channel_id
+                {extra_join}
+                WHERE pm.classification IS NOT NULL
+                  AND pm.metadata_json IS NOT NULL
+                  AND TRIM(pm.metadata_json) != ''
+                  AND datetime(rm.message_date) >= datetime(?)
+                  {extra_where}
+                ORDER BY datetime(rm.message_date) DESC, pm.id DESC
+                LIMIT ?;
+                """,
+                (cutoff_iso, limit),
+            )
+            rows = cur.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def update_opportunity_status(
+        self,
+        *,
+        opportunity_id: int | None = None,
+        processed_message_id: int | None = None,
+        status: str,
+    ) -> None:
+        """Update an opportunity status by id or processed message id."""
+        if opportunity_id is None and processed_message_id is None:
+            return
+
+        now_iso = _utc_now_iso()
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            if opportunity_id is not None:
+                cur.execute(
+                    """
+                    UPDATE opportunities
+                    SET status = ?, updated_at = ?
+                    WHERE id = ?;
+                    """,
+                    (status, now_iso, int(opportunity_id)),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE opportunities
+                    SET status = ?, updated_at = ?
+                    WHERE processed_message_id = ?;
+                    """,
+                    (status, now_iso, int(processed_message_id)),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def upsert_opportunity(
+        self,
+        *,
+        processed_message_id: int,
+        raw_message_id: int,
+        opportunity_type: str,
+        title: str,
+        summary: str,
+        channel_username: str | None,
+        post_link: str | None,
+        message_date: str | None,
+        deadline_text: str | None,
+        status: str,
+        score: float,
+        confidence_score: float,
+        source_category: str | None,
+        metadata_json: str | None,
+    ) -> int:
+        """Insert or update an opportunity extracted from a processed message."""
+        now_iso = _utc_now_iso()
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO opportunities (
+                    processed_message_id, raw_message_id, opportunity_type, title, summary,
+                    channel_username, post_link, message_date, deadline_text, status, score,
+                    confidence_score, source_category, created_at, updated_at, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(processed_message_id) DO UPDATE SET
+                    opportunity_type=excluded.opportunity_type,
+                    title=excluded.title,
+                    summary=excluded.summary,
+                    channel_username=excluded.channel_username,
+                    post_link=excluded.post_link,
+                    message_date=excluded.message_date,
+                    deadline_text=excluded.deadline_text,
+                    status=excluded.status,
+                    score=excluded.score,
+                    confidence_score=excluded.confidence_score,
+                    source_category=excluded.source_category,
+                    updated_at=excluded.updated_at,
+                    metadata_json=excluded.metadata_json;
+                """,
+                (
+                    processed_message_id,
+                    raw_message_id,
+                    opportunity_type,
+                    title,
+                    summary,
+                    channel_username,
+                    post_link,
+                    message_date,
+                    deadline_text,
+                    status,
+                    float(score),
+                    float(confidence_score),
+                    source_category,
+                    now_iso,
+                    now_iso,
+                    metadata_json,
+                ),
+            )
+            conn.commit()
+            return int(cur.lastrowid or 0)
+        finally:
+            conn.close()
+
+    def get_active_opportunities(
+        self,
+        limit: int = 20,
+        max_age_days: int = 90,
+        min_score: int = 1,
+    ) -> List[Dict[str, Any]]:
+        """Return active opportunities sorted by score and freshness."""
+        cutoff_iso = (datetime.utcnow() - timedelta(days=max(1, max_age_days))).isoformat(timespec="seconds")
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT *
+                FROM opportunities
+                WHERE status = 'active'
+                  AND score >= ?
+                  AND (message_date IS NULL OR datetime(message_date) >= datetime(?))
+                ORDER BY score DESC, datetime(message_date) DESC, id DESC
+                LIMIT ?;
+                """,
+                (float(min_score), cutoff_iso, limit),
+            )
+            rows = cur.fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def count_opportunities(self, *, active_only: bool = False) -> int:
+        """Count opportunities in the database."""
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            if active_only:
+                cur.execute("SELECT COUNT(*) AS c FROM opportunities WHERE status = 'active';")
+            else:
+                cur.execute("SELECT COUNT(*) AS c FROM opportunities;")
+            row = cur.fetchone()
+            return int(row["c"]) if row else 0
+        finally:
+            conn.close()
+
 
     def mark_processed_messages_included(self, message_ids: List[int]) -> None:
         """
@@ -789,4 +1060,3 @@ class Repository:
             return int(cur.lastrowid)
         finally:
             conn.close()
-

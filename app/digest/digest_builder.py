@@ -28,12 +28,30 @@ SECTION_MAPPING = {
     "grant": "OPPORTUNITIES",
     "accelerator": "OPPORTUNITIES",
     "hackathon": "OPPORTUNITIES",
+    "competition": "OPPORTUNITIES",
+    "open_call": "OPPORTUNITIES",
+    "internship": "OPPORTUNITIES",
     "startup": "TOP NEWS",
     "funding": "TOP NEWS",
     "ecosystem_news": "TOP NEWS",
     "job": "JOBS",
     "event": "EVENTS",
 }
+
+PAST_EVENT_MARKERS = [
+    "прошел",
+    "прошла",
+    "прошли",
+    "состоялся",
+    "состоялась",
+    "состоялись",
+    "представили",
+    "объявили победителей",
+    "наградили",
+    "итоги",
+    "завершился",
+    "завершилась",
+]
 
 
 @dataclass
@@ -62,7 +80,7 @@ class DigestBuilder:
     Builds a plain-text digest from analyzed messages stored in SQLite.
     """
 
-    def __init__(self, max_items: int = 7, candidate_limit: int = 50) -> None:
+    def __init__(self, max_items: int = 13, candidate_limit: int = 50) -> None:
         self.repo = Repository()
         self.max_items = max_items
         self.candidate_limit = candidate_limit
@@ -78,6 +96,47 @@ class DigestBuilder:
         except json.JSONDecodeError:
             return None
         return data if isinstance(data, dict) else None
+
+    def _build_opportunity_fallback_digest(self) -> DigestBuildResult:
+        """Build a product-safe digest fallback from active opportunities."""
+        cfg = get_config()
+        rows = self.repo.get_active_opportunities(
+            limit=min(self.max_items, 8),
+            max_age_days=max(14, int(getattr(cfg.opportunity, "max_age_days", 14) or 14)),
+            min_score=max(4, int(getattr(cfg.opportunity, "min_score", 4) or 4) - 1),
+        )
+        if not rows:
+            return DigestBuildResult(digest_text="", included_processed_message_ids=[], items_count=0, title="")
+
+        today = datetime.utcnow().date().isoformat()
+        title = f"Ежедневный дайджест Jarvis — {today}"
+        lines = [
+            title,
+            "",
+            "Сегодня новых сильных сообщений мало, поэтому показываю актуальные возможности из базы AIMA.",
+            "",
+            "ВОЗМОЖНОСТИ",
+            "------------",
+        ]
+
+        for idx, row in enumerate(rows, start=1):
+            lines.append(f"{idx}. {str(row.get('summary') or '').strip()}")
+            channel = row.get("channel_username") or "@unknown"
+            lines.append(f"   Источник: @{str(channel).lstrip('@')}")
+            deadline_text = str(row.get("deadline_text") or "").strip()
+            if deadline_text:
+                lines.append(f"   Дедлайн/дата: {deadline_text}")
+            if row.get("post_link"):
+                lines.append(f"   Ссылка: {row.get('post_link')}")
+            lines.append("")
+
+        digest_text = "\n".join(lines).strip()
+        return DigestBuildResult(
+            digest_text=digest_text,
+            included_processed_message_ids=[],
+            items_count=len(rows),
+            title=title,
+        )
 
     def _filter_items_strict(self, rows: List[Dict[str, Any]], threshold_used: int) -> tuple[List[DigestItem], Dict[str, int]]:
         """
@@ -142,9 +201,12 @@ class DigestBuilder:
             if not summary:
                 rejections['summary_missing'] += 1
                 continue
-            # Strict summary length: minimum 20 chars
-            if len(summary) < 20:
+            # Strict summary length: minimum 12 chars or 3 words
+            if len(summary) < 12 and len(summary.split()) < 3:
                 rejections['summary_too_short'] += 1
+                continue
+            if category == "event" and any(marker in summary.lower() for marker in PAST_EVENT_MARKERS):
+                rejections['category_not_allowed'] += 1
                 continue
 
             channel_username = row.get("channel_username") or ""
@@ -207,8 +269,8 @@ class DigestBuilder:
             is_not_relevant = False
             
             if isinstance(is_relevant, bool):
-                # In relaxed mode, allow False relevance (don't filter out)
-                is_not_relevant = False
+                # In relaxed mode, reject only explicit False values.
+                is_not_relevant = not is_relevant
             elif isinstance(is_relevant, str):
                 # Only reject if explicitly marked as not relevant
                 is_not_relevant = is_relevant.strip().lower() in {"false", "0", "no"}
@@ -252,6 +314,9 @@ class DigestBuilder:
             words = summary.split()
             if len(summary) < 10 and len(words) < 3:
                 rejections['summary_too_short'] += 1
+                continue
+            if category == "event" and any(marker in summary.lower() for marker in PAST_EVENT_MARKERS):
+                rejections['category_not_allowed'] += 1
                 continue
 
             channel_username = row.get("channel_username") or ""
@@ -436,12 +501,11 @@ class DigestBuilder:
 
         if not rows:
             logger.info("No digest candidates found.")
-            return DigestBuildResult(
-                digest_text="",
-                included_processed_message_ids=[],
-                items_count=0,
-                title="",
-            )
+            fallback = self._build_opportunity_fallback_digest()
+            if fallback.items_count > 0:
+                logger.info("Using opportunity fallback digest with %d items.", fallback.items_count)
+                return fallback
+            return DigestBuildResult(digest_text="", included_processed_message_ids=[], items_count=0, title="")
 
         # Try strict filtering first
         items: List[DigestItem] = []
@@ -461,13 +525,13 @@ class DigestBuilder:
         logger.info("Strict mode yielded %d items", len(strict_items))
         
         # If strict mode yields too few items, try relaxed mode
-        if len(strict_items) < 3:
+        if len(strict_items) < 5:
             logger.info("Too few items in strict mode, trying relaxed mode")
             relaxed_items, relaxed_rejections = self._filter_items_relaxed(rows, threshold_used)
             logger.info("Relaxed mode yielded %d items", len(relaxed_items))
             
             # If relaxed mode still yields too few items, try fallback mode
-            if len(relaxed_items) < 3:
+            if len(relaxed_items) < 5:
                 logger.info("Still too few items, trying fallback mode")
                 fallback_items, fallback_rejections = self._filter_items_fallback(rows)
                 logger.info("Fallback mode yielded %d items", len(fallback_items))
@@ -500,12 +564,11 @@ class DigestBuilder:
 
         if not parsed_items:
             logger.info("No usable digest items after filtering/validation.")
-            return DigestBuildResult(
-                digest_text="",
-                included_processed_message_ids=[],
-                items_count=0,
-                title="",
-            )
+            fallback = self._build_opportunity_fallback_digest()
+            if fallback.items_count > 0:
+                logger.info("Using opportunity fallback digest after filtering produced no items.")
+                return fallback
+            return DigestBuildResult(digest_text="", included_processed_message_ids=[], items_count=0, title="")
 
         # Deduplication + diversity filtering:
         # - Dedup by normalized summary similarity (substring OR >70% word overlap)
@@ -594,6 +657,20 @@ class DigestBuilder:
             "предлагает возможность",
             "в рамках",
         ]
+        opportunity_markers = [
+            "подать заявку",
+            "регистрация",
+            "зарегистрироваться",
+            "дедлайн",
+            "до ",
+            "open call",
+            "хакатон",
+            "грант",
+            "конкурс",
+            "вакансия",
+            "стажировка",
+            "акселератор",
+        ]
         fact_keywords = [
             "компания",
             "проект",
@@ -635,11 +712,13 @@ class DigestBuilder:
                 bonus += 5
             return bonus
 
-        def _generic_penalty(text: str) -> int:
+        def _generic_penalty(text: str, category: str) -> int:
             penalty = 0
             lower = (text or "").lower()
             if any(marker in lower for marker in generic_markers):
                 penalty += 15
+            if any(marker in lower for marker in PAST_EVENT_MARKERS):
+                penalty += 30
             words = (text or "").split()
             if len(words) < 8:
                 penalty += 8
@@ -647,6 +726,8 @@ class DigestBuilder:
                 r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b", text or ""
             ):
                 penalty += 10
+            if category == "event" and not any(marker in lower for marker in opportunity_markers):
+                penalty += 12
             return penalty
 
         def _similarity(a_norm: str, b_norm: str) -> float:
@@ -671,12 +752,22 @@ class DigestBuilder:
                     max_sim = sim
             uniqueness_bonus = int((1.0 - max_sim) * 20)
 
-            generic_penalty = _generic_penalty(it.summary)
+            opportunity_bonus = 0
+            lower_summary = (it.summary or "").lower()
+            if it.category in {"grant", "accelerator", "hackathon", "competition", "open_call", "internship"}:
+                opportunity_bonus += 18
+            elif it.category == "job":
+                opportunity_bonus += 10
+            elif it.category == "event" and any(marker in lower_summary for marker in opportunity_markers):
+                opportunity_bonus += 6
+
+            generic_penalty = _generic_penalty(it.summary, it.category)
             it.final_score = (
                 base
                 + freshness_bonus
                 + informativeness_bonus
                 + uniqueness_bonus
+                + opportunity_bonus
                 - generic_penalty
             )
 
@@ -750,17 +841,17 @@ class DigestBuilder:
         logger.info("Initial rows loaded: %d", rows_loaded_initial)
         if rows_loaded_initial != rows_loaded:
             logger.info("After recency fallback to %d days: %d", recency_used, rows_loaded)
-        logger.info("After metadata parsing: %d", rows_loaded - rejections['metadata_missing'])
-        logger.info("After relevance filter: %d", rows_loaded - rejections['metadata_missing'] - rejections['not_relevant'])
-        logger.info("After priority filter: %d", rows_loaded - rejections['metadata_missing'] - rejections['not_relevant'] - rejections['priority_below_threshold'])
-        logger.info("After summary validation: %d", len(parsed_items) + rejections['deduplication'] + rejections['channel_diversity'])
-        logger.info("After dedup: %d", len(parsed_items) + rejections['channel_diversity'])
+        logger.info("After metadata parsing: %d", rows_loaded - rejections.get('metadata_missing', 0))
+        logger.info("After relevance filter: %d", rows_loaded - rejections.get('metadata_missing', 0) - rejections.get('not_relevant', 0))
+        logger.info("After priority filter: %d", rows_loaded - rejections.get('metadata_missing', 0) - rejections.get('not_relevant', 0) - rejections.get('priority_below_threshold', 0))
+        logger.info("After summary validation: %d", len(parsed_items) + rejections.get('deduplication', 0) + rejections.get('channel_diversity', 0))
+        logger.info("After dedup: %d", len(parsed_items) + rejections.get('channel_diversity', 0))
         logger.info("After diversity filter: %d", len(parsed_items))
         logger.info("Final items count: %d", len(items))
         logger.info("Rejections: metadata_missing=%d, not_relevant=%d, category_not_allowed=%d, priority_below_threshold=%d, summary_missing=%d, summary_too_short=%d, deduplication=%d, channel_diversity=%d",
-                   rejections['metadata_missing'], rejections['not_relevant'], rejections['category_not_allowed'], 
-                   rejections['priority_below_threshold'], rejections['summary_missing'], rejections['summary_too_short'],
-                   rejections['deduplication'], rejections['channel_diversity'])
+                   rejections.get('metadata_missing', 0), rejections.get('not_relevant', 0), rejections.get('category_not_allowed', 0), 
+                   rejections.get('priority_below_threshold', 0), rejections.get('summary_missing', 0), rejections.get('summary_too_short', 0),
+                   rejections.get('deduplication', 0), rejections.get('channel_diversity', 0))
         logger.info("===============================")
 
         return DigestBuildResult(

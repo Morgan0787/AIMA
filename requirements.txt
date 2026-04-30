@@ -3,3 +3,5 @@ requests>=2.31,<3.0
 google-genai
 python-dotenv>=1.0,<2.0
 
+
+python-telegram-bot>=20,<22

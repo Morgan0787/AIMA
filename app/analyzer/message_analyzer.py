@@ -56,7 +56,7 @@ class MessageAnalyzer:
     structured analysis back into the database.
     """
 
-    def __init__(self, batch_limit: int = 10) -> None:
+    def __init__(self, batch_limit: int = 15) -> None:
         self.repo = Repository()
         cfg = get_config()
         configured_provider = str(getattr(cfg.ai, "provider", "ollama") or "ollama").strip().lower()
@@ -87,21 +87,40 @@ class MessageAnalyzer:
         prompt_path = project_root / "prompts" / "classify_prompt.txt"
         self.prompt_template = prompt_path.read_text(encoding="utf-8")
 
-    def _default_analysis(self) -> Dict[str, Any]:
+    def _default_analysis(self, source_text: str = "") -> Dict[str, Any]:
         """
         Return a safe default analysis object.
 
         Used when the model output is missing, invalid, or malformed.
+        The fallback should still be minimally useful for digest generation.
         """
+        fallback_summary = self._fallback_summary_from_text(source_text)
         return {
-            "category": "other",
-            "importance_score": 1,
-            "actionability_score": 1,
-            "priority_score": 1,
-            "is_relevant": False,
-            "summary": "",
+            "category": "ecosystem_news",
+            "importance_score": 3,
+            "actionability_score": 2,
+            "priority_score": 3,
+            "is_relevant": True,
+            "summary": fallback_summary,
             "why_it_matters": "",
+            "is_opportunity": False,
+            "opportunity_type": "",
+            "deadline_text": "",
+            "action_hint": "",
+            "confidence_score": 0.5,
         }
+
+    def _fallback_summary_from_text(self, text: str) -> str:
+        """Build a short fallback summary from the source text."""
+        text = (text or "").strip()
+        if not text:
+            return "Найдена потенциально полезная возможность."
+        text = re.sub(r"\s+", " ", text).strip()
+        words = text.split()
+        if len(words) > 15:
+            text = " ".join(words[:15])
+        text = text[:160].strip(" .,!?:;")
+        return text or "Найдена потенциально полезная возможность."
 
     def _clean_summary(self, summary: str, fallback_text: str = "") -> str:
         """
@@ -224,7 +243,7 @@ class MessageAnalyzer:
         If some fields are missing or invalid, we fall back to safe defaults.
         """
         # Start from default analysis and selectively override fields.
-        result = self._default_analysis()
+        result = self._default_analysis(source_text=data.get("__source_text", ""))
 
         # category
         cat = str(data.get("category", "")).strip().lower()
@@ -275,6 +294,30 @@ class MessageAnalyzer:
         result["summary"] = self._clean_summary(summary, fallback_text=why)
         result["why_it_matters"] = why
 
+        # Optional opportunity fields
+        is_opp = data.get("is_opportunity", False)
+        if isinstance(is_opp, bool):
+            result["is_opportunity"] = is_opp
+        elif isinstance(is_opp, str):
+            result["is_opportunity"] = is_opp.strip().lower() in {"true", "1", "yes"}
+        else:
+            result["is_opportunity"] = False
+
+        opportunity_type = str(data.get("opportunity_type", "")).strip().lower()
+        result["opportunity_type"] = opportunity_type[:50]
+
+        deadline_text = data.get("deadline_text", "")
+        result["deadline_text"] = str(deadline_text).strip()[:120] if deadline_text is not None else ""
+
+        action_hint = data.get("action_hint", "")
+        result["action_hint"] = str(action_hint).strip()[:160] if action_hint is not None else ""
+
+        try:
+            confidence_score = float(data.get("confidence_score", 0.5))
+        except (TypeError, ValueError):
+            confidence_score = 0.5
+        result["confidence_score"] = max(0.0, min(1.0, confidence_score))
+
         return result
 
     def analyze(self) -> AnalysisStats:
@@ -308,7 +351,7 @@ class MessageAnalyzer:
                         msg.id,
                         raw_response,
                     )
-                    normalized = self._default_analysis()
+                    normalized = self._default_analysis(msg.short_text or msg.cleaned_text)
                     metadata_json = json.dumps(normalized, ensure_ascii=False)
                     
                     logger.info("Using default analysis for message_id=%s: %s", msg.id, metadata_json[:200])
@@ -325,11 +368,32 @@ class MessageAnalyzer:
                     continue
 
                 logger.info("Parsed JSON for message_id=%s: %s", msg.id, str(parsed)[:200])
+                parsed["__source_text"] = msg.short_text or msg.cleaned_text
                 normalized = self._validate_and_normalize(parsed)
                 
                 # Store full validated JSON string in metadata_json.
+                if not str(normalized.get("summary") or "").strip():
+                    normalized["summary"] = self._fallback_summary_from_text(msg.short_text or msg.cleaned_text)
+                if not str(normalized.get("category") or "").strip():
+                    normalized["category"] = "ecosystem_news"
+                try:
+                    normalized["priority_score"] = max(1, min(10, int(normalized.get("priority_score", 3))))
+                except (TypeError, ValueError):
+                    normalized["priority_score"] = 3
+                try:
+                    normalized["importance_score"] = max(1, min(10, int(normalized.get("importance_score", 3))))
+                except (TypeError, ValueError):
+                    normalized["importance_score"] = 3
+                if "is_relevant" not in normalized:
+                    normalized["is_relevant"] = True
+                normalized.setdefault("is_opportunity", False)
+                normalized.setdefault("opportunity_type", "")
+                normalized.setdefault("deadline_text", "")
+                normalized.setdefault("action_hint", "")
+                normalized.setdefault("confidence_score", 0.5)
+
                 metadata_json = json.dumps(normalized, ensure_ascii=False)
-                
+
                 logger.info("Final normalized metadata for message_id=%s: %s", msg.id, metadata_json[:200])
                 logger.info("Saving analysis to DB for message_id=%s", msg.id)
 
@@ -350,6 +414,15 @@ class MessageAnalyzer:
                 )
                 failed += 1
 
+        total_analyzed_rows = self.repo.count_analyzed_processed_messages()
+        total_metadata_rows = self.repo.count_processed_messages_with_metadata()
+        recent_analyzed_rows = self.repo.count_recent_analyzed_processed_messages(days=7)
+        logger.info(
+            "Analysis DB sanity check: analyzed_rows=%d metadata_rows=%d recent_analyzed_rows_7d=%d",
+            total_analyzed_rows,
+            total_metadata_rows,
+            recent_analyzed_rows,
+        )
         logger.info(
             "Analysis finished. Messages analyzed: %d, failures: %d",
             analyzed,

@@ -75,6 +75,18 @@ class DebugConfig:
 
 
 @dataclass
+class OpportunityConfig:
+    """Opportunity hunter configuration."""
+
+    enabled: bool = True
+    backfill_batch_size: int = 200
+    max_age_days: int = 90
+    report_top_n: int = 8
+    publish_to_telegram: bool = True
+    min_score: int = 6
+
+
+@dataclass
 class JarvisConfig:
     """Top-level configuration structure for Jarvis v2."""
 
@@ -85,6 +97,7 @@ class JarvisConfig:
     openai: OpenAIConfig
     delivery: DeliveryConfig
     debug: DebugConfig
+    opportunity: OpportunityConfig
     database_path: Path
     log_level: str = "INFO"
     digest_max_age_days: int = 3
@@ -165,6 +178,15 @@ def get_config() -> JarvisConfig:
         reuse_analyzed_messages=bool(raw.get("debug", {}).get("reuse_analyzed_messages", False)),
     )
 
+    opportunity_cfg = OpportunityConfig(
+        enabled=bool(raw.get("opportunity", {}).get("enabled", OpportunityConfig().enabled)),
+        backfill_batch_size=max(10, int(raw.get("opportunity", {}).get("backfill_batch_size", OpportunityConfig().backfill_batch_size))),
+        max_age_days=max(7, int(raw.get("opportunity", {}).get("max_age_days", OpportunityConfig().max_age_days))),
+        report_top_n=max(3, int(raw.get("opportunity", {}).get("report_top_n", OpportunityConfig().report_top_n))),
+        publish_to_telegram=bool(raw.get("opportunity", {}).get("publish_to_telegram", OpportunityConfig().publish_to_telegram)),
+        min_score=max(1, min(10, int(raw.get("opportunity", {}).get("min_score", OpportunityConfig().min_score)))),
+    )
+
     try:
         digest_max_age_days = int(raw.get("digest_max_age_days", 3))
     except (TypeError, ValueError):
@@ -179,6 +201,7 @@ def get_config() -> JarvisConfig:
         openai=openai_cfg,
         delivery=delivery_cfg,
         debug=debug_cfg,
+        opportunity=opportunity_cfg,
         database_path=db_path,
         log_level=str(raw.get("logging", {}).get("level", "INFO")),
         digest_max_age_days=digest_max_age_days,

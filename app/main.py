@@ -29,15 +29,14 @@ def main() -> None:
     # Place your real `.env` file in the project root (same folder as `config/`).
     load_dotenv()
 
-    from .collector.telegram_collector import TelegramCollector
     from .core.config import get_config
     from .core.logger import get_logger
     from .storage.database import init_db
-    from .processor.message_processor import MessageProcessor
-    from .analyzer.message_analyzer import MessageAnalyzer
     from .digest.digest_builder import DigestBuilder
     from .digest.publisher import publish_digest
     from .storage.repository import Repository
+    from .opportunity.hunter import OpportunityHunter
+    from .services import PipelineService
 
     logger = get_logger(__name__)
 
@@ -52,16 +51,15 @@ def main() -> None:
     # Initialize the SQLite database.
     init_db()
 
-    collector = TelegramCollector()
-    collection_result = collector.collect_new_messages()
+    pipeline = PipelineService()
+    collection_result = pipeline.refresh_ingestion()
 
     logger.info(
         "Collection complete. Total new messages: %d",
         collection_result.total_new_messages,
     )
 
-    processor = MessageProcessor()
-    processing_stats = processor.process()
+    processing_stats = pipeline.refresh_processing()
 
     logger.info(
         "Processing complete. Processed: %d, duplicates: %d",
@@ -69,14 +67,17 @@ def main() -> None:
         processing_stats.duplicate_count,
     )
 
-    analyzer = MessageAnalyzer()
-    analysis_stats = analyzer.analyze()
+    analysis_stats = pipeline.refresh_analysis()
 
     logger.info(
         "Analysis complete. Analyzed: %d, failures: %d",
         analysis_stats.analyzed_count,
         analysis_stats.failed_count,
     )
+
+    hunter = OpportunityHunter()
+    opportunity_stats = pipeline.refresh_opportunities()
+    opportunity_report = hunter.build_report()
 
     repo = Repository()
     builder = DigestBuilder()
@@ -86,15 +87,16 @@ def main() -> None:
     digest_items = digest_result.items_count
 
     if digest_items > 0:
-        from datetime import datetime  # local import for simplicity
+        from datetime import UTC, datetime  # local import for simplicity
 
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         digest_date = now.date().isoformat()
         created_at = now.isoformat(timespec="seconds")
 
         min_publish_items = 3
         recent_used_days = 7
         similarity_threshold = 0.85
+        debug_reuse_mode = bool(getattr(config.debug, "reuse_analyzed_messages", False))
 
         def _normalize_for_similarity(text: str) -> str:
             text = (text or "").lower()
@@ -121,7 +123,11 @@ def main() -> None:
         skip_reason: str | None = None
         similarity_to_last = 0.0
 
-        if digest_items < min_publish_items:
+        if not current_ids and not debug_reuse_mode:
+            skip_reason = "fallback_snapshot_only"
+            logger.info("Skipping digest publish: built from fallback snapshot without new analyzed items.")
+
+        if skip_reason is None and not debug_reuse_mode and digest_items < min_publish_items:
             skip_reason = "too_few_items"
             logger.info(
                 "Skipping digest publish: too few items (%d < %d).",
@@ -129,7 +135,7 @@ def main() -> None:
                 min_publish_items,
             )
 
-        if skip_reason is None and current_ids:
+        if skip_reason is None and current_ids and not debug_reuse_mode:
             recent_used_ids = repo.get_recent_published_processed_message_ids(
                 days=recent_used_days
             )
@@ -140,7 +146,7 @@ def main() -> None:
                     recent_used_days,
                 )
 
-        if skip_reason is None:
+        if skip_reason is None and not debug_reuse_mode:
             last_published = repo.get_last_published_digest()
             if last_published:
                 last_text = str(last_published.get("content") or "")
@@ -156,6 +162,8 @@ def main() -> None:
 
         published = False
         published_to = None
+        if debug_reuse_mode:
+            logger.info("Debug reuse mode enabled: bypassing anti-repeat publish policy checks.")
         if skip_reason is None:
             published, published_to = publish_digest(
                 digest_result.digest_text, title=digest_result.title
@@ -191,6 +199,21 @@ def main() -> None:
     else:
         logger.info("No digest candidates matched thresholds; digest not created/published.")
 
+    if getattr(config.opportunity, "enabled", True):
+        if opportunity_report.items_count > 0:
+            logger.info(
+                "Opportunity report built: items=%d new_candidates=%d",
+                opportunity_report.items_count,
+                opportunity_stats.created_or_updated,
+            )
+            if getattr(config.opportunity, "publish_to_telegram", True) and opportunity_stats.created_or_updated > 0:
+                opp_published, _ = publish_digest(opportunity_report.report_text, title=opportunity_report.title)
+                logger.info("Opportunity report published to Telegram: %s", "yes" if opp_published else "no")
+            else:
+                logger.info("Opportunity report not published to Telegram (publish disabled or no new opportunities).")
+        else:
+            logger.info("Opportunity hunter enabled but report is empty.")
+
     print("=== Jarvis v2 Core Summary ===")
     print(f"New raw messages collected: {collection_result.total_new_messages}")
     print(f"Messages processed:        {processing_stats.processed_count}")
@@ -199,9 +222,9 @@ def main() -> None:
     print(f"Analysis failures:         {analysis_stats.failed_count}")
     print(f"Digest items:              {digest_items}")
     print(f"Digest published:          {digest_published}")
+    print(f"Active opportunities:      {opportunity_stats.active_count if 'opportunity_stats' in locals() else 0}")
     print("================================")
 
 
 if __name__ == "__main__":
     main()
-

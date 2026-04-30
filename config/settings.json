@@ -33,6 +33,14 @@
     "model": "openai/gpt-4o-mini",
     "base_url": "https://openrouter.ai/api/v1"
   },
+  "opportunity": {
+    "enabled": true,
+    "backfill_batch_size": 200,
+    "max_age_days": 90,
+    "report_top_n": 8,
+    "publish_to_telegram": true,
+    "min_score": 6
+  },
   "database": {
     "path": "data/jarvis.db"
   },
@@ -40,7 +48,7 @@
     "telegram_target": "-5102249943"
   },
   "debug": {
-    "reuse_analyzed_messages": true
+    "reuse_analyzed_messages": false
   },
   "logging": {
     "level": "INFO"

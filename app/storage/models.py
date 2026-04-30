@@ -70,3 +70,26 @@ class Digest:
     published_to: Optional[str]
     metadata_json: Optional[str]
 
+
+
+@dataclass
+class Opportunity:
+    """Represents an extracted opportunity from a Telegram message."""
+
+    id: Optional[int]
+    processed_message_id: int
+    raw_message_id: int
+    opportunity_type: str
+    title: str
+    summary: str
+    channel_username: Optional[str]
+    post_link: Optional[str]
+    message_date: Optional[datetime]
+    deadline_text: Optional[str]
+    status: str
+    score: float
+    confidence_score: float
+    source_category: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+    metadata_json: Optional[str]
