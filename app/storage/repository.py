@@ -499,13 +499,23 @@ class Repository:
         finally:
             conn.close()
 
-    def get_unanalyzed_processed_messages(self, limit: int = 100) -> List[ProcessedMessage]:
+    def get_unanalyzed_processed_messages(
+        self,
+        limit: int = 100,
+        *,
+        max_attempts: int = 3,
+        retry_cooldown_minutes: int = 30,
+    ) -> List[ProcessedMessage]:
         """
-        Fetch processed messages that have not yet been analyzed by Ollama.
+        Fetch processed messages that still need usable analysis output.
 
-        We treat `classification IS NULL` as "not analyzed".
-        Returns newest messages first by joining with raw_messages.
+        Failed rows remain retryable, but we cool them down briefly so the
+        analyzer can move forward through the backlog instead of hammering
+        the same broken item on every pass.
         """
+        cooldown_cutoff = (
+            datetime.utcnow() - timedelta(minutes=max(0, retry_cooldown_minutes))
+        ).isoformat(timespec="seconds")
         conn = get_connection()
         try:
             cur = conn.cursor()
@@ -515,10 +525,15 @@ class Repository:
                 FROM processed_messages pm
                 JOIN raw_messages rm ON rm.id = pm.raw_message_id
                 WHERE pm.classification IS NULL
-                ORDER BY rm.message_date DESC, pm.id DESC
+                  AND COALESCE(pm.analysis_attempts, 0) < ?
+                  AND (
+                    pm.analysis_last_attempt_at IS NULL
+                    OR datetime(pm.analysis_last_attempt_at) <= datetime(?)
+                  )
+                ORDER BY COALESCE(pm.analysis_attempts, 0) ASC, datetime(rm.message_date) DESC, pm.id DESC
                 LIMIT ?;
                 """,
-                (limit,),
+                (max(1, max_attempts), cooldown_cutoff, limit),
             )
             rows = cur.fetchall()
             result: List[ProcessedMessage] = []
@@ -543,12 +558,40 @@ class Repository:
         finally:
             conn.close()
 
+    def mark_processed_message_analysis_started(
+        self,
+        *,
+        processed_message_id: int,
+        provider: str,
+    ) -> None:
+        """Record that a message has entered the analysis queue."""
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE processed_messages
+                SET analysis_status = 'running',
+                    analysis_attempts = COALESCE(analysis_attempts, 0) + 1,
+                    analysis_last_attempt_at = ?,
+                    analysis_error = NULL,
+                    analysis_provider = ?
+                WHERE id = ?;
+                """,
+                (_utc_now_iso(), provider, processed_message_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def update_processed_message_analysis(
         self,
         processed_message_id: int,
         classification: str,
         importance_score: float,
         metadata_json: str,
+        *,
+        provider: str | None = None,
     ) -> None:
         """
         Update analysis fields for a processed message.
@@ -565,15 +608,59 @@ class Repository:
                 UPDATE processed_messages
                 SET classification = ?,
                     importance_score = ?,
-                    metadata_json = ?
+                    metadata_json = ?,
+                    analysis_status = 'success',
+                    analysis_error = NULL,
+                    analysis_provider = COALESCE(?, analysis_provider)
                 WHERE id = ?;
                 """,
-                (classification, importance_score, metadata_json, processed_message_id),
+                (
+                    classification,
+                    importance_score,
+                    metadata_json,
+                    provider,
+                    processed_message_id,
+                ),
             )
             rows_affected = cur.rowcount
             conn.commit()
             logger.info("Updated analysis for message_id=%s: rows_affected=%d, classification=%s, importance_score=%s", 
                        processed_message_id, rows_affected, classification, importance_score)
+        finally:
+            conn.close()
+
+    def mark_processed_message_analysis_failed(
+        self,
+        *,
+        processed_message_id: int,
+        error_payload: str,
+        max_attempts: int = 3,
+    ) -> None:
+        """Persist a failed attempt without promoting the row to analyzed."""
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT COALESCE(analysis_attempts, 0) AS attempts
+                FROM processed_messages
+                WHERE id = ?;
+                """,
+                (processed_message_id,),
+            )
+            row = cur.fetchone()
+            attempts = int(row["attempts"]) if row else 0
+            next_status = "failed" if attempts >= max(1, max_attempts) else "retry"
+            cur.execute(
+                """
+                UPDATE processed_messages
+                SET analysis_status = ?,
+                    analysis_error = ?
+                WHERE id = ?;
+                """,
+                (next_status, error_payload, processed_message_id),
+            )
+            conn.commit()
         finally:
             conn.close()
 
@@ -638,6 +725,25 @@ class Repository:
                   AND datetime(rm.message_date) >= datetime(?);
                 """,
                 (cutoff,),
+            )
+            row = cur.fetchone()
+            return int(row["total"] if row else 0)
+        finally:
+            conn.close()
+
+    def count_pending_analysis_messages(self, *, max_attempts: int = 3) -> int:
+        """Count rows that still need a successful analysis result."""
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM processed_messages
+                WHERE classification IS NULL
+                  AND COALESCE(analysis_attempts, 0) < ?;
+                """,
+                (max(1, max_attempts),),
             )
             row = cur.fetchone()
             return int(row["total"] if row else 0)

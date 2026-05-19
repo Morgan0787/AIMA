@@ -49,9 +49,36 @@ class PipelineService:
         logger.info("PipelineService: refreshing processing")
         return MessageProcessor().process()
 
-    def refresh_analysis(self) -> AnalysisStats:
-        logger.info("PipelineService: refreshing analysis")
-        return MessageAnalyzer().analyze()
+    def refresh_analysis(self, *, max_batches: int = 1) -> AnalysisStats:
+        logger.info(
+            "PipelineService: refreshing analysis (max_batches=%d)",
+            max(1, max_batches),
+        )
+        analyzer = MessageAnalyzer()
+        total = AnalysisStats(analyzed_count=0, failed_count=0)
+
+        for batch_no in range(1, max(1, max_batches) + 1):
+            batch_stats = analyzer.analyze()
+            total.analyzed_count += batch_stats.analyzed_count
+            total.failed_count += batch_stats.failed_count
+            total.attempted_count += batch_stats.attempted_count
+            total.remaining_count = batch_stats.remaining_count
+
+            if batch_stats.attempted_count == 0:
+                logger.info(
+                    "PipelineService: analysis queue is idle after batch %d.",
+                    batch_no,
+                )
+                break
+
+            if batch_stats.remaining_count == 0:
+                logger.info(
+                    "PipelineService: analysis backlog drained after batch %d.",
+                    batch_no,
+                )
+                break
+
+        return total
 
     def refresh_opportunities(self) -> OpportunityBackfillStats:
         logger.info("PipelineService: refreshing opportunities")
@@ -85,6 +112,8 @@ class PipelineService:
             result.steps_run.append("analysis")
             analysis_total.analyzed_count += analysis.analyzed_count
             analysis_total.failed_count += analysis.failed_count
+            analysis_total.attempted_count += analysis.attempted_count
+            analysis_total.remaining_count = analysis.remaining_count
 
             opportunities = self.refresh_opportunities()
             result.steps_run.append("opportunities")
@@ -95,7 +124,7 @@ class PipelineService:
             nothing_new = (
                 ingestion.total_new_messages == 0
                 and processing.processed_count == 0
-                and analysis.analyzed_count == 0
+                and analysis.attempted_count == 0
             )
             if nothing_new:
                 logger.info("PipelineService: no new data after cycle %d, stopping.", cycle)

@@ -99,7 +99,8 @@ class FreshnessService:
                     """
                     SELECT COUNT(*)
                     FROM processed_messages
-                    WHERE classification IS NULL;
+                    WHERE classification IS NULL
+                      AND COALESCE(analysis_status, 'pending') != 'failed';
                     """
                 )
                 or 0

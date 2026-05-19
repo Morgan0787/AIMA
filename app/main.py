@@ -67,12 +67,14 @@ def main() -> None:
         processing_stats.duplicate_count,
     )
 
-    analysis_stats = pipeline.refresh_analysis()
+    analysis_stats = pipeline.refresh_analysis(max_batches=12)
 
     logger.info(
-        "Analysis complete. Analyzed: %d, failures: %d",
+        "Analysis complete. Attempted: %d, analyzed: %d, failures: %d, remaining: %d",
+        analysis_stats.attempted_count,
         analysis_stats.analyzed_count,
         analysis_stats.failed_count,
+        analysis_stats.remaining_count,
     )
 
     hunter = OpportunityHunter()
@@ -218,8 +220,10 @@ def main() -> None:
     print(f"New raw messages collected: {collection_result.total_new_messages}")
     print(f"Messages processed:        {processing_stats.processed_count}")
     print(f"Duplicates detected:       {processing_stats.duplicate_count}")
+    print(f"Analysis attempted:        {analysis_stats.attempted_count}")
     print(f"Messages analyzed:         {analysis_stats.analyzed_count}")
     print(f"Analysis failures:         {analysis_stats.failed_count}")
+    print(f"Analysis backlog pending:  {analysis_stats.remaining_count}")
     print(f"Digest items:              {digest_items}")
     print(f"Digest published:          {digest_published}")
     print(f"Active opportunities:      {opportunity_stats.active_count if 'opportunity_stats' in locals() else 0}")

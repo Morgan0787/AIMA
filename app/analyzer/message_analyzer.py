@@ -49,6 +49,8 @@ class AnalysisStats:
 
     analyzed_count: int
     failed_count: int
+    attempted_count: int = 0
+    remaining_count: int = 0
 
 
 class MessageAnalyzer:
@@ -57,7 +59,14 @@ class MessageAnalyzer:
     structured analysis back into the database.
     """
 
-    def __init__(self, batch_limit: int = 50) -> None:
+    def __init__(
+        self,
+        batch_limit: int = 25,
+        *,
+        max_attempts: int = 3,
+        retry_cooldown_minutes: int = 30,
+        inter_request_delay_seconds: float | None = None,
+    ) -> None:
         self.repo = Repository()
         cfg = get_config()
         configured_provider = str(getattr(cfg.ai, "provider", "ollama") or "ollama").strip().lower()
@@ -81,7 +90,13 @@ class MessageAnalyzer:
 
         logger.info("Using AI provider: %s", provider)
         self.provider = provider
-        self.batch_limit = batch_limit
+        self.batch_limit = max(1, batch_limit)
+        self.max_attempts = max(1, max_attempts)
+        self.retry_cooldown_minutes = max(0, retry_cooldown_minutes)
+        if inter_request_delay_seconds is None:
+            self.inter_request_delay_seconds = 0.5 if provider == "gemini" else 0.0
+        else:
+            self.inter_request_delay_seconds = max(0.0, inter_request_delay_seconds)
 
         # Load prompt template once.
         project_root = get_project_root()
@@ -346,14 +361,38 @@ class MessageAnalyzer:
 
         return result
 
+    def _build_failure_payload(
+        self,
+        *,
+        kind: str,
+        raw_response: str | None = None,
+        exception: Exception | None = None,
+    ) -> str:
+        payload = {
+            "kind": kind,
+            "provider": self.provider,
+            "raw_response_preview": (raw_response or "")[:1000],
+            "exception": str(exception)[:500] if exception else "",
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
     def analyze(self) -> AnalysisStats:
         """
-        Run one analysis pass using Ollama.
+        Run one analysis pass and keep invalid outputs retryable.
         """
-        messages = self.repo.get_unanalyzed_processed_messages(limit=self.batch_limit)
+        messages = self.repo.get_unanalyzed_processed_messages(
+            limit=self.batch_limit,
+            max_attempts=self.max_attempts,
+            retry_cooldown_minutes=self.retry_cooldown_minutes,
+        )
         if not messages:
             logger.info("No unanalyzed processed messages found.")
-            return AnalysisStats(analyzed_count=0, failed_count=0)
+            return AnalysisStats(
+                analyzed_count=0,
+                failed_count=0,
+                attempted_count=0,
+                remaining_count=0,
+            )
 
         logger.info(
             "Selected %d newest unanalyzed messages for analysis with %s...", len(messages), self.provider
@@ -361,35 +400,39 @@ class MessageAnalyzer:
 
         analyzed = 0
         failed = 0
+        attempted = 0
 
         for idx, msg in enumerate(messages):
+            raw_response: str | None = None
             try:
+                attempted += 1
+                self.repo.mark_processed_message_analysis_started(
+                    processed_message_id=int(msg.id),
+                    provider=self.provider,
+                )
                 prompt = self._build_prompt(msg.short_text or msg.cleaned_text)
                 raw_response = self.client.generate(prompt)
-                
+
                 logger.info("Raw AI response for message_id=%s: %r", msg.id, raw_response[:500] if raw_response else "EMPTY")
-                
+
                 parsed = self._extract_json_object(raw_response or "")
-                
+
                 if parsed is None:
+                    failure_kind = "invalid_json" if raw_response else "empty_response"
                     logger.warning(
-                        "Invalid/empty JSON from AI for processed_message_id=%s: %r",
+                        "Invalid/empty JSON from AI for processed_message_id=%s (kind=%s): %r",
                         msg.id,
+                        failure_kind,
                         raw_response,
                     )
-                    normalized = self._default_analysis(msg.short_text or msg.cleaned_text)
-                    metadata_json = json.dumps(normalized, ensure_ascii=False)
-                    
-                    logger.info("Using default analysis for message_id=%s: %s", msg.id, metadata_json[:200])
-                    
-                    self.repo.update_processed_message_analysis(
+                    self.repo.mark_processed_message_analysis_failed(
                         processed_message_id=int(msg.id),
-                        classification=str(normalized["category"]),
-                        importance_score=float(normalized["importance_score"]),
-                        metadata_json=metadata_json,
+                        error_payload=self._build_failure_payload(
+                            kind=failure_kind,
+                            raw_response=raw_response,
+                        ),
+                        max_attempts=self.max_attempts,
                     )
-                    logger.info("Saved default analysis to DB for message_id=%s", msg.id)
-                    analyzed += 1
                     failed += 1
                     continue
 
@@ -416,6 +459,8 @@ class MessageAnalyzer:
                 normalized.setdefault("deadline_text", "")
                 normalized.setdefault("action_hint", "")
                 normalized.setdefault("confidence_score", 0.5)
+                normalized["analysis_provider"] = self.provider
+                normalized["analysis_status"] = "success"
 
                 metadata_json = json.dumps(normalized, ensure_ascii=False)
 
@@ -427,8 +472,9 @@ class MessageAnalyzer:
                     classification=str(normalized["category"]),
                     importance_score=float(normalized["importance_score"]),
                     metadata_json=metadata_json,
+                    provider=self.provider,
                 )
-                
+
                 logger.info("Successfully saved analysis to DB for message_id=%s", msg.id)
                 analyzed += 1
             except Exception as exc:  # noqa: BLE001
@@ -437,15 +483,25 @@ class MessageAnalyzer:
                     getattr(msg, "id", None),
                     exc,
                 )
+                self.repo.mark_processed_message_analysis_failed(
+                    processed_message_id=int(getattr(msg, "id", 0)),
+                    error_payload=self._build_failure_payload(
+                        kind="exception",
+                        raw_response=raw_response,
+                        exception=exc,
+                    ),
+                    max_attempts=self.max_attempts,
+                )
                 failed += 1
-            # Respect free-tier Google RPM limits by adding a delay
-            # between per-message generation requests.
-            if idx < len(messages) - 1:
-                time.sleep(4)
+            if idx < len(messages) - 1 and self.inter_request_delay_seconds > 0:
+                time.sleep(self.inter_request_delay_seconds)
 
         total_analyzed_rows = self.repo.count_analyzed_processed_messages()
         total_metadata_rows = self.repo.count_processed_messages_with_metadata()
         recent_analyzed_rows = self.repo.count_recent_analyzed_processed_messages(days=7)
+        remaining_rows = self.repo.count_pending_analysis_messages(
+            max_attempts=self.max_attempts
+        )
         logger.info(
             "Analysis DB sanity check: analyzed_rows=%d metadata_rows=%d recent_analyzed_rows_7d=%d",
             total_analyzed_rows,
@@ -453,9 +509,15 @@ class MessageAnalyzer:
             recent_analyzed_rows,
         )
         logger.info(
-            "Analysis finished. Messages analyzed: %d, failures: %d",
+            "Analysis finished. Attempted: %d, analyzed: %d, failures: %d, remaining_pending: %d",
+            attempted,
             analyzed,
             failed,
+            remaining_rows,
         )
-        return AnalysisStats(analyzed_count=analyzed, failed_count=failed)
-
+        return AnalysisStats(
+            analyzed_count=analyzed,
+            failed_count=failed,
+            attempted_count=attempted,
+            remaining_count=remaining_rows,
+        )

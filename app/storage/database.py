@@ -164,6 +164,12 @@ def init_db() -> None:
 
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_raw_messages_message_date ON raw_messages(message_date);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_processed_messages_classification ON processed_messages(classification);")
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_processed_messages_analysis_queue
+            ON processed_messages(classification, analysis_status, analysis_last_attempt_at, id);
+            """
+        )
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_opportunities_status_score ON opportunities(status, score DESC);")
 
         conn.commit()
@@ -190,4 +196,8 @@ def _ensure_processed_messages_columns(conn: sqlite3.Connection) -> None:
     _add_column("is_duplicate", "is_duplicate INTEGER NOT NULL DEFAULT 0")
     _add_column("duplicate_of_raw_message_id", "duplicate_of_raw_message_id INTEGER")
     _add_column("created_at", "created_at TEXT NOT NULL DEFAULT ''")
-
+    _add_column("analysis_status", "analysis_status TEXT NOT NULL DEFAULT 'pending'")
+    _add_column("analysis_attempts", "analysis_attempts INTEGER NOT NULL DEFAULT 0")
+    _add_column("analysis_last_attempt_at", "analysis_last_attempt_at TEXT")
+    _add_column("analysis_error", "analysis_error TEXT")
+    _add_column("analysis_provider", "analysis_provider TEXT")
