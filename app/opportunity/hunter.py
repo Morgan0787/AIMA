@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from ..core.config import get_config
 from ..core.logger import get_logger
+from ..opportunity.lifecycle import assess_opportunity_lifecycle, parse_deadline_date
 from ..storage.repository import Repository
 
 logger = get_logger(__name__)
@@ -222,6 +223,7 @@ class OpportunityHunter:
     def _parse_deadline_date(
         self, deadline_text: str, reference_date: Optional[datetime]
     ) -> Optional[datetime]:
+        return parse_deadline_date(deadline_text, reference_date=reference_date)
         if not deadline_text:
             return None
         ref = reference_date or datetime.now(UTC).replace(tzinfo=None)
@@ -408,10 +410,18 @@ class OpportunityHunter:
         score = self._derive_score(metadata, opp_type or "opportunity", message_date)
         if confidence < 0.75:
             score -= 1.0
-        if deadline_dt is not None and deadline_dt < datetime.now(UTC).replace(tzinfo=None):
-            status = "expired"
-        else:
-            status = "active"
+        lifecycle_probe = {
+            "opportunity_type": opp_type or "opportunity",
+            "source_category": category,
+            "score": score,
+            "confidence_score": confidence,
+            "deadline_text": deadline_text,
+            "message_date": message_date,
+            "created_at": message_date,
+            "updated_at": message_date,
+        }
+        lifecycle = assess_opportunity_lifecycle(lifecycle_probe)
+        status = lifecycle.next_status if lifecycle.is_stale else "active"
 
         return {
             "is_opportunity": is_opportunity,
@@ -457,25 +467,10 @@ class OpportunityHunter:
 
     def _refresh_existing_statuses(self) -> None:
         """Expire active opportunities whose deadline has already passed."""
-        rows = self.repo.get_active_opportunities(
-            limit=500,
-            max_age_days=self.cfg.max_age_days,
-            min_score=1,
-        )
-        now_naive = datetime.now(UTC).replace(tzinfo=None)
-        expired = 0
-
-        for row in rows:
-            metadata = self._safe_metadata(row.get("metadata_json"))
-            deadline_text = str(metadata.get("deadline_text") or row.get("deadline_text") or "").strip()
-            deadline_dt = self._parse_deadline_date(deadline_text, None) if deadline_text else None
-            if deadline_dt is None or deadline_dt >= now_naive:
-                continue
-            self.repo.update_opportunity_status(opportunity_id=int(row["id"]), status="expired")
-            expired += 1
-
+        expired = self.repo.decay_stale_active_opportunities(limit=500)
         if expired:
             logger.info("Opportunity hunter expired %d stale opportunities.", expired)
+        return
 
     def backfill(self) -> OpportunityBackfillStats:
         if not self.cfg.enabled:
@@ -515,9 +510,29 @@ class OpportunityHunter:
             if not assessed["is_opportunity"]:
                 existing_id = row.get("existing_opportunity_id")
                 if existing_id:
-                    deadline_text = str(assessed.get("deadline_text") or metadata.get("deadline_text") or "").strip()
-                    deadline_dt = self._parse_deadline_date(deadline_text, None) if deadline_text else None
-                    next_status = "expired" if deadline_dt and deadline_dt < datetime.now(UTC).replace(tzinfo=None) else "inactive"
+                    existing_metadata = self._safe_metadata(row.get("existing_opportunity_metadata_json"))
+                    candidate = {
+                        "opportunity_type": str(
+                            existing_metadata.get("opportunity_type")
+                            or existing_metadata.get("category")
+                            or row.get("classification")
+                            or ""
+                        ).strip(),
+                        "source_category": str(existing_metadata.get("category") or row.get("classification") or "").strip(),
+                        "score": float(existing_metadata.get("score") or 0.0),
+                        "confidence_score": float(existing_metadata.get("confidence_score") or 0.0),
+                        "deadline_text": str(
+                            assessed.get("deadline_text")
+                            or existing_metadata.get("deadline_text")
+                            or existing_metadata.get("deadline")
+                            or ""
+                        ).strip(),
+                        "message_date": row.get("message_date"),
+                        "created_at": row.get("message_date"),
+                        "updated_at": row.get("message_date"),
+                    }
+                    lifecycle = assess_opportunity_lifecycle(candidate)
+                    next_status = lifecycle.next_status if lifecycle.is_stale else "inactive"
                     self.repo.update_opportunity_status(opportunity_id=int(existing_id), status=next_status)
                 skipped_low_confidence += 1
                 continue

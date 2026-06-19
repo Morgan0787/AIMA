@@ -9,6 +9,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from ..opportunity.lifecycle import assess_opportunity_lifecycle
+
 
 MONTHS = {
     "январ": 1,
@@ -273,6 +275,9 @@ class SearchEngine:
             deadline_iso=str(metadata.get("deadline_iso") or "").strip(),
         )
 
+    def _is_live_opportunity_row(self, row: sqlite3.Row) -> bool:
+        return not assess_opportunity_lifecycle(row).is_stale
+
     def _matches_terms(self, haystacks: Sequence[str], terms: Sequence[str]) -> bool:
         text = " || ".join((h or "").lower() for h in haystacks)
         return any(term.lower() in text for term in terms)
@@ -435,7 +440,11 @@ class SearchEngine:
                     message_date,
                     opportunity_type,
                     score,
+                    confidence_score,
                     deadline_text,
+                    created_at,
+                    updated_at,
+                    source_category,
                     metadata_json
                 FROM opportunities
                 WHERE status = 'active'
@@ -450,6 +459,8 @@ class SearchEngine:
         now = datetime.now(UTC)
         ranked: List[tuple[float, SearchResult]] = []
         for row in rows:
+            if not self._is_live_opportunity_row(row):
+                continue
             metadata = self._safe_json(row["metadata_json"])
             item = self._row_to_result(row)
             haystacks = [
@@ -601,7 +612,11 @@ class SearchEngine:
                     message_date,
                     opportunity_type,
                     score,
+                    confidence_score,
                     deadline_text,
+                    created_at,
+                    updated_at,
+                    source_category,
                     metadata_json
                 FROM opportunities
                 WHERE status = 'active'
@@ -617,6 +632,8 @@ class SearchEngine:
         upper = now + timedelta(days=max(1, days_ahead))
         results: List[tuple[datetime, float, SearchResult]] = []
         for row in rows:
+            if not self._is_live_opportunity_row(row):
+                continue
             metadata = self._safe_json(row["metadata_json"])
             item = self._row_to_result(row)
             category = (item.category or "").strip().lower()
@@ -648,7 +665,11 @@ class SearchEngine:
                     message_date,
                     opportunity_type,
                     score,
+                    confidence_score,
                     deadline_text,
+                    created_at,
+                    updated_at,
+                    source_category,
                     metadata_json
                 FROM opportunities
                 WHERE status = 'active'
@@ -665,6 +686,8 @@ class SearchEngine:
             upper = now + timedelta(days=window_days)
             found: List[tuple[float, SearchResult]] = []
             for row in rows:
+                if not self._is_live_opportunity_row(row):
+                    continue
                 metadata = self._safe_json(row["metadata_json"])
                 item = self._row_to_result(row)
                 if self._looks_like_weak_event(item, metadata):
@@ -690,7 +713,7 @@ class SearchEngine:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT summary, channel_username, post_link, message_date, opportunity_type, score, deadline_text, metadata_json
+                SELECT summary, channel_username, post_link, message_date, opportunity_type, score, confidence_score, deadline_text, created_at, updated_at, source_category, metadata_json
                 FROM opportunities
                 WHERE status = 'active'
                 ORDER BY score DESC, datetime(message_date) DESC, id DESC
@@ -704,6 +727,8 @@ class SearchEngine:
         now = datetime.now(UTC)
         ranked: List[tuple[float, SearchResult]] = []
         for row in rows:
+            if not self._is_live_opportunity_row(row):
+                continue
             metadata = self._safe_json(row["metadata_json"])
             item = self._row_to_result(row)
             category = (item.category or "").strip().lower()

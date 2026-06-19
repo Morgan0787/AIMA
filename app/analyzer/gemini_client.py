@@ -25,7 +25,7 @@ class GeminiClient(BaseAIClient):
         configured_model = str(cfg.model or "").strip()
         if configured_model and not configured_model.startswith("models/"):
             configured_model = f"models/{configured_model}"
-        self.model = configured_model or "models/gemini-1.5-flash"
+        self.model = configured_model or "models/gemini-2.0-flash"
         self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
         self._client = None
 

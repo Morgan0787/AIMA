@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
 from ..core.config import get_config
@@ -23,7 +24,55 @@ logger = get_logger(__name__)
 
 
 SECTION_ORDER = ["OPPORTUNITIES", "TOP NEWS", "JOBS", "EVENTS"]
-IMPORTANCE_THRESHOLD = 0.6
+STRICT_IMPORTANCE_THRESHOLD = 0.6
+RELAXED_IMPORTANCE_THRESHOLD = 0.45
+FALLBACK_IMPORTANCE_THRESHOLD = 0.3
+RECENT_DIGEST_SUPPRESSION_DAYS = 7
+INTRA_DIGEST_DUPLICATE_THRESHOLD = 0.62
+RECENT_DIGEST_DUPLICATE_THRESHOLD = 0.84
+
+CYRILLIC_TRANSLITERATION = str.maketrans(
+    {
+        "а": "a",
+        "б": "b",
+        "в": "v",
+        "г": "g",
+        "д": "d",
+        "е": "e",
+        "ё": "e",
+        "ж": "zh",
+        "з": "z",
+        "и": "i",
+        "й": "y",
+        "к": "k",
+        "л": "l",
+        "м": "m",
+        "н": "n",
+        "о": "o",
+        "п": "p",
+        "р": "r",
+        "с": "s",
+        "т": "t",
+        "у": "u",
+        "ф": "f",
+        "х": "h",
+        "ц": "ts",
+        "ч": "ch",
+        "ш": "sh",
+        "щ": "shch",
+        "ъ": "",
+        "ы": "y",
+        "ь": "",
+        "э": "e",
+        "ю": "yu",
+        "я": "ya",
+        "ў": "u",
+        "қ": "k",
+        "ғ": "g",
+        "ҳ": "h",
+        "і": "i",
+    }
+)
 
 SECTION_MAPPING = {
     "grant": "OPPORTUNITIES",
@@ -109,7 +158,7 @@ class DigestBuilder:
         if not rows:
             return DigestBuildResult(digest_text="", included_processed_message_ids=[], items_count=0, title="")
 
-        today = datetime.utcnow().date().isoformat()
+        today = datetime.now(UTC).date().isoformat()
         title = f"Ежедневный дайджест Jarvis — {today}"
         lines = [
             title,
@@ -132,9 +181,15 @@ class DigestBuilder:
             lines.append("")
 
         digest_text = "\n".join(lines).strip()
+        included_ids: List[int] = []
+        for row in rows:
+            try:
+                included_ids.append(int(row.get("processed_message_id")))
+            except (TypeError, ValueError):
+                continue
         return DigestBuildResult(
             digest_text=digest_text,
-            included_processed_message_ids=[],
+            included_processed_message_ids=included_ids,
             items_count=len(rows),
             title=title,
         )
@@ -183,7 +238,7 @@ class DigestBuilder:
                 importance = 0.0
             importance = max(0.0, min(1.0, importance))
 
-            if importance < IMPORTANCE_THRESHOLD:
+            if importance < STRICT_IMPORTANCE_THRESHOLD:
                 rejections['importance_below_threshold'] += 1
                 continue
 
@@ -299,7 +354,7 @@ class DigestBuilder:
                 importance = 0.0
             importance = max(0.0, min(1.0, importance))
 
-            if importance < IMPORTANCE_THRESHOLD:
+            if importance < STRICT_IMPORTANCE_THRESHOLD:
                 rejections['importance_below_threshold'] += 1
                 continue
 
@@ -479,25 +534,33 @@ class DigestBuilder:
             logger.info("Normal mode: reuse_analyzed_messages=disabled - only new messages will be used")
 
         def _fetch_candidates(max_age_days: int) -> tuple[List[Dict[str, Any]], int]:
-            # 7 -> if count >= 5 use them
             rows = self.repo.get_digest_candidates_with_threshold(
-                min_priority=7, limit=self.candidate_limit, max_age_days=max_age_days, reuse_analyzed_messages=reuse_mode
+                min_importance=STRICT_IMPORTANCE_THRESHOLD,
+                limit=self.candidate_limit,
+                max_age_days=max_age_days,
+                reuse_analyzed_messages=reuse_mode,
             )
             if len(rows) >= 5:
-                return rows, 7
+                return rows, STRICT_IMPORTANCE_THRESHOLD
 
-            # Else fallback to 5
+            # Else fallback to a moderately broader pool.
             rows = self.repo.get_digest_candidates_with_threshold(
-                min_priority=5, limit=self.candidate_limit, max_age_days=max_age_days, reuse_analyzed_messages=reuse_mode
+                min_importance=RELAXED_IMPORTANCE_THRESHOLD,
+                limit=self.candidate_limit,
+                max_age_days=max_age_days,
+                reuse_analyzed_messages=reuse_mode,
             )
             if len(rows) >= 3:
-                return rows, 5
+                return rows, RELAXED_IMPORTANCE_THRESHOLD
 
-            # If still < 3, fallback to 3
+            # If still < 3, fallback to the broadest safe pool.
             rows = self.repo.get_digest_candidates_with_threshold(
-                min_priority=3, limit=self.candidate_limit, max_age_days=max_age_days, reuse_analyzed_messages=reuse_mode
+                min_importance=FALLBACK_IMPORTANCE_THRESHOLD,
+                limit=self.candidate_limit,
+                max_age_days=max_age_days,
+                reuse_analyzed_messages=reuse_mode,
             )
-            return rows, 3
+            return rows, FALLBACK_IMPORTANCE_THRESHOLD
 
         rows, threshold_used = _fetch_candidates(recent_days)
         rows_loaded_initial = len(rows)
@@ -510,7 +573,7 @@ class DigestBuilder:
 
         rows_loaded = len(rows)
 
-        logger.info("Digest threshold used: %d", threshold_used)
+        logger.info("Digest threshold used: %.2f", threshold_used)
         logger.info("Digest recency window used: %d days", recency_used)
         logger.info("Rows loaded from database: %d", rows_loaded)
 
@@ -587,31 +650,92 @@ class DigestBuilder:
             return DigestBuildResult(digest_text="", included_processed_message_ids=[], items_count=0, title="")
 
         # Deduplication + diversity filtering:
-        # - Dedup by normalized summary similarity (substring OR >70% word overlap)
+        # - Dedup by normalized summary similarity (word, anchor, trigram, and digit overlap)
         # - Limit max 2 items per channel
         # Applied BEFORE final sort/slicing.
         original_count = len(parsed_items)
 
         def _normalize_summary(text: str) -> str:
             text = (text or "").lower()
-            # Remove punctuation while keeping unicode letters/digits.
+            text = text.translate(CYRILLIC_TRANSLITERATION)
+            text = unicodedata.normalize("NFKD", text)
+            text = "".join(ch for ch in text if not unicodedata.combining(ch))
             text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
             text = re.sub(r"\s+", " ", text).strip()
             return text
 
-        def _word_overlap_ratio(a: str, b: str) -> float:
-            wa = set(a.split())
-            wb = set(b.split())
-            if not wa or not wb:
+        def _tokenize(text: str) -> set[str]:
+            return {token for token in text.split() if len(token) >= 3}
+
+        def _character_ngrams(text: str, size: int = 3) -> set[str]:
+            compact = re.sub(r"\s+", "", text)
+            if not compact:
+                return set()
+            if len(compact) <= size:
+                return {compact}
+            return {compact[idx : idx + size] for idx in range(len(compact) - size + 1)}
+
+        def _overlap_ratio(a: set[str], b: set[str]) -> float:
+            if not a or not b:
                 return 0.0
-            return len(wa & wb) / float(max(len(wa), len(wb)))
+            return len(a & b) / float(max(len(a), len(b)))
+
+        def _build_signature(text: str) -> Dict[str, Any]:
+            norm = _normalize_summary(text)
+            tokens = _tokenize(norm)
+            anchors = {token for token in tokens if len(token) >= 4 or any(ch.isdigit() for ch in token)}
+            return {
+                "norm": norm,
+                "tokens": tokens,
+                "anchors": anchors,
+                "trigrams": _character_ngrams(norm),
+                "digits": set(re.findall(r"\d+", text or "")),
+            }
+
+        def _signature_similarity(a: Dict[str, Any], b: Dict[str, Any]) -> float:
+            if not a.get("norm") or not b.get("norm"):
+                return 0.0
+            if a["norm"] == b["norm"]:
+                return 1.0
+            return max(
+                _overlap_ratio(set(a.get("tokens", set())), set(b.get("tokens", set()))),
+                _overlap_ratio(set(a.get("anchors", set())), set(b.get("anchors", set()))),
+                _overlap_ratio(set(a.get("trigrams", set())), set(b.get("trigrams", set()))),
+                _overlap_ratio(set(a.get("digits", set())), set(b.get("digits", set()))),
+            )
+
+        def _extract_digest_item_texts(content: str) -> List[str]:
+            texts: List[str] = []
+            for line in (content or "").splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                match = re.match(r"^\d+\.\s+(.*)$", stripped)
+                if match:
+                    texts.append(match.group(1).strip())
+            if not texts and content.strip():
+                texts.append(content.strip())
+            return texts
+
+        recent_digest_rows = [] if reuse_mode else self.repo.get_recent_published_digests(
+            days=max(RECENT_DIGEST_SUPPRESSION_DAYS, recency_used),
+            limit=self.candidate_limit,
+        )
+        recent_signatures: List[Dict[str, Any]] = []
+        for digest_row in recent_digest_rows:
+            digest_text = str(digest_row.get("content") or "")
+            for digest_item_text in _extract_digest_item_texts(digest_text):
+                recent_signatures.append(_build_signature(digest_item_text))
+
+        def _recent_similarity(item_signature: Dict[str, Any]) -> float:
+            if not recent_signatures:
+                return 0.0
+            return max(_signature_similarity(item_signature, prev) for prev in recent_signatures)
 
         def _is_similar_summary(a_norm: str, b_norm: str) -> bool:
             if not a_norm or not b_norm:
                 return False
-            if a_norm in b_norm or b_norm in a_norm:
-                return True
-            return _word_overlap_ratio(a_norm, b_norm) > 0.7
+            return _signature_similarity(_build_signature(a_norm), _build_signature(b_norm)) >= INTRA_DIGEST_DUPLICATE_THRESHOLD
 
         # Sort for greedy dedup (prefer higher priority/importance).
         candidates = sorted(
@@ -662,7 +786,7 @@ class DigestBuilder:
 
         # Composite ranking: reduce over-reliance on raw priority_score.
         # final_score = base + freshness + informativeness + uniqueness - generic_penalty
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         normalized_summaries = [_normalize_summary(it.summary) for it in parsed_items]
         generic_markers = [
             "стоит отметить",
@@ -697,6 +821,43 @@ class DigestBuilder:
             "дата",
             "срок",
         ]
+
+        generic_markers.extend([
+            "ecosystem news",
+            "community update",
+            "networking",
+            "meetup",
+            "ceremony",
+            "announcement",
+            "press release",
+        ])
+        opportunity_markers.extend([
+            "apply",
+            "application",
+            "deadline",
+            "grant",
+            "grants",
+            "accelerator",
+            "hackathon",
+            "competition",
+            "contest",
+            "funding",
+            "fundraise",
+            "investor",
+            "pitch",
+            "cohort",
+            "incubator",
+            "startup",
+            "open call",
+        ])
+        fact_keywords.extend([
+            "deadline",
+            "date",
+            "funding",
+            "grant",
+            "accelerator",
+            "investor",
+        ])
 
         def _freshness_bonus(dt: Optional[datetime]) -> int:
             if not dt:
@@ -744,19 +905,23 @@ class DigestBuilder:
                 penalty += 10
             if category == "event" and not any(marker in lower for marker in opportunity_markers):
                 penalty += 12
+            if category == "ecosystem_news":
+                penalty += 20
             return penalty
 
         def _similarity(a_norm: str, b_norm: str) -> float:
-            if not a_norm or not b_norm:
-                return 0.0
-            if a_norm in b_norm or b_norm in a_norm:
-                return 1.0
-            return _word_overlap_ratio(a_norm, b_norm)
+            return _signature_similarity(_build_signature(a_norm), _build_signature(b_norm))
 
         for i, it in enumerate(parsed_items):
             base = it.priority_score * 10 + it.importance_score * 3
             freshness_bonus = _freshness_bonus(it.message_date)
             informativeness_bonus = _informativeness_bonus(it.summary)
+            novelty_similarity = _recent_similarity(_build_signature(it.summary))
+            novelty_penalty = int(novelty_similarity * 35)
+            if novelty_similarity >= RECENT_DIGEST_DUPLICATE_THRESHOLD and (
+                it.category == "ecosystem_news" or it.priority_score <= 6
+            ):
+                novelty_penalty += 20
 
             # Uniqueness: lower similarity to the rest => higher bonus.
             max_sim = 0.0
@@ -770,8 +935,22 @@ class DigestBuilder:
 
             opportunity_bonus = 0
             lower_summary = (it.summary or "").lower()
-            if it.category in {"grant", "accelerator", "hackathon", "competition", "open_call", "internship"}:
-                opportunity_bonus += 18
+            if it.category == "grant":
+                opportunity_bonus += 24
+            elif it.category == "accelerator":
+                opportunity_bonus += 24
+            elif it.category == "hackathon":
+                opportunity_bonus += 22
+            elif it.category == "competition":
+                opportunity_bonus += 22
+            elif it.category == "open_call":
+                opportunity_bonus += 20
+            elif it.category == "funding":
+                opportunity_bonus += 20
+            elif it.category == "startup":
+                opportunity_bonus += 16
+            elif it.category == "internship":
+                opportunity_bonus += 12
             elif it.category == "job":
                 opportunity_bonus += 10
             elif it.category == "event" and any(marker in lower_summary for marker in opportunity_markers):
@@ -784,6 +963,7 @@ class DigestBuilder:
                 + informativeness_bonus
                 + uniqueness_bonus
                 + opportunity_bonus
+                - novelty_penalty
                 - generic_penalty
             )
 
@@ -808,7 +988,7 @@ class DigestBuilder:
             section = SECTION_MAPPING.get(item.category, "TOP NEWS")
             sections.setdefault(section, []).append(item)
 
-        today = datetime.utcnow().date().isoformat()
+        today = datetime.now(UTC).date().isoformat()
         title = f"Ежедневный дайджест Jarvis — {today}"
 
         lines: List[str] = []

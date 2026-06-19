@@ -18,6 +18,7 @@ from typing import Optional, List, Any
 
 from .database import get_connection
 from .models import Channel, RawMessage, ProcessedMessage
+from ..opportunity.lifecycle import assess_opportunity_lifecycle
 from ..core.logger import get_logger
 
 
@@ -829,7 +830,7 @@ class Repository:
         - classification != 'other'
         - included_in_digest = 0
         - is_duplicate = 0
-        - importance_score >= 6
+        - importance_score >= 0.6
 
         Joins:
         - raw_messages (post_link, message_date, channel_id)
@@ -859,7 +860,7 @@ class Repository:
                   AND pm.classification != 'other'
                   AND pm.included_in_digest = 0
                   AND pm.is_duplicate = 0
-                  AND pm.importance_score >= 7
+                  AND pm.importance_score >= 0.6
                 ORDER BY datetime(rm.message_date) DESC, pm.importance_score DESC, pm.id DESC
                 LIMIT ?;
                 """,
@@ -872,7 +873,7 @@ class Repository:
 
     def get_digest_candidates_with_threshold(
         self,
-        min_priority: int,
+        min_importance: float,
         limit: int = 50,
         max_age_days: int | None = None,
         reuse_analyzed_messages: bool = False,
@@ -881,9 +882,9 @@ class Repository:
         Return processed messages suitable for the digest, using a dynamic threshold.
 
         This is identical to `get_digest_candidates()`, except:
-        - pm.importance_score >= 7
+        - pm.importance_score >= 0.6
           becomes
-        - pm.importance_score >= min_priority
+        - pm.importance_score >= min_importance
         - optional recency filter:
           - rm.message_date >= (now - max_age_days)
         - when reuse_analyzed_messages=True:
@@ -949,10 +950,10 @@ class Repository:
                   AND pm.is_duplicate = 0
                   AND pm.importance_score >= ?
                   AND (? IS NULL OR datetime(rm.message_date) >= datetime(?))
-                ORDER BY pm.importance_score DESC, pm.id ASC
+                ORDER BY datetime(rm.message_date) DESC, pm.importance_score DESC, pm.id DESC
                 LIMIT ?;
                 """
-                params = (float(min_priority), cutoff_iso, cutoff_iso, limit)
+                params = (float(min_importance), cutoff_iso, cutoff_iso, limit)
             
             cur.execute(query, params)
             rows = cur.fetchall()
@@ -961,6 +962,35 @@ class Repository:
             mode = "DEBUG/REUSE" if reuse_analyzed_messages else "NORMAL"
             logger.info("Digest candidate query (%s): loaded %d rows", mode, len(rows))
             
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_recent_published_digests(self, days: int = 7, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        Return recently published digests for novelty suppression.
+
+        Only digests that actually reached a delivery target are considered.
+        """
+        cutoff = (datetime.utcnow() - timedelta(days=max(1, days))).isoformat(
+            timespec="seconds"
+        )
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT id, digest_date, title, content, created_at, published_to, metadata_json
+                FROM digests
+                WHERE published_to IS NOT NULL
+                  AND TRIM(published_to) != ''
+                  AND created_at >= ?
+                ORDER BY id DESC
+                LIMIT ?;
+                """,
+                (cutoff, limit),
+            )
+            rows = cur.fetchall()
             return [dict(row) for row in rows]
         finally:
             conn.close()
@@ -1055,6 +1085,81 @@ class Repository:
         finally:
             conn.close()
 
+    def decay_stale_active_opportunities(self, limit: int = 1000) -> int:
+        """Mark stale active opportunities as expired or inactive."""
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    opportunity_type,
+                    source_category,
+                    score,
+                    confidence_score,
+                    deadline_text,
+                    message_date,
+                    created_at,
+                    updated_at,
+                    metadata_json
+                FROM opportunities
+                WHERE status = 'active'
+                ORDER BY datetime(COALESCE(updated_at, created_at, message_date)) ASC, id ASC
+                LIMIT ?;
+                """,
+                (max(1, limit),),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return 0
+
+            expired_ids: List[int] = []
+            inactive_ids: List[int] = []
+            for row in rows:
+                decision = assess_opportunity_lifecycle(row)
+                if not decision.is_stale:
+                    continue
+                try:
+                    opp_id = int(row["id"])
+                except (TypeError, ValueError):
+                    continue
+                if decision.next_status == "inactive":
+                    inactive_ids.append(opp_id)
+                else:
+                    expired_ids.append(opp_id)
+
+            updated = 0
+            if expired_ids:
+                placeholders = ",".join(["?"] * len(expired_ids))
+                cur.execute(
+                    f"""
+                    UPDATE opportunities
+                    SET status = 'expired', updated_at = ?
+                    WHERE id IN ({placeholders})
+                    AND status = 'active';
+                    """,
+                    (_utc_now_iso(), *expired_ids),
+                )
+                updated += cur.rowcount if cur.rowcount is not None else len(expired_ids)
+            if inactive_ids:
+                placeholders = ",".join(["?"] * len(inactive_ids))
+                cur.execute(
+                    f"""
+                    UPDATE opportunities
+                    SET status = 'inactive', updated_at = ?
+                    WHERE id IN ({placeholders})
+                    AND status = 'active';
+                    """,
+                    (_utc_now_iso(), *inactive_ids),
+                )
+                updated += cur.rowcount if cur.rowcount is not None else len(inactive_ids)
+
+            conn.commit()
+            return int(updated)
+        finally:
+            conn.close()
+
     def upsert_opportunity(
         self,
         *,
@@ -1132,6 +1237,7 @@ class Repository:
         min_score: int = 1,
     ) -> List[Dict[str, Any]]:
         """Return active opportunities sorted by score and freshness."""
+        self.decay_stale_active_opportunities(limit=max(1000, limit * 8))
         cutoff_iso = (datetime.utcnow() - timedelta(days=max(1, max_age_days))).isoformat(timespec="seconds")
         conn = get_connection()
         try:
@@ -1149,7 +1255,13 @@ class Repository:
                 (float(min_score), cutoff_iso, limit),
             )
             rows = cur.fetchall()
-            return [dict(row) for row in rows]
+            live_rows: List[dict[str, Any]] = []
+            for row in rows:
+                decision = assess_opportunity_lifecycle(row)
+                if decision.is_stale:
+                    continue
+                live_rows.append(dict(row))
+            return live_rows
         finally:
             conn.close()
 
