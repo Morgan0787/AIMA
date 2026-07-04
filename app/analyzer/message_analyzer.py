@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
@@ -49,6 +50,18 @@ class AnalysisStats:
     failed_count: int
     attempted_count: int = 0
     remaining_count: int = 0
+
+
+@dataclass
+class _MessageWorkResult:
+    """Per-message AI outcome collected from a worker thread (no DB I/O)."""
+
+    message_id: int
+    source_text: str
+    raw_response: str | None = None
+    normalized: Dict[str, Any] | None = None
+    failure_kind: str | None = None
+    exception: Exception | None = None
 
 
 class MessageAnalyzer:
@@ -311,6 +324,144 @@ class MessageAnalyzer:
         }
         return json.dumps(payload, ensure_ascii=False)
 
+    def _max_worker_threads(self) -> int:
+        """Cap concurrent workers at pool size (max 10), minimum 1."""
+        return min(10, max(1, self.client.pool_size))
+
+    def _analyze_single_message(self, msg: Any) -> _MessageWorkResult:
+        """
+        Run AI generation and JSON validation for one message (thread-safe, no DB).
+        """
+        message_id = int(msg.id)
+        source_text = msg.short_text or msg.cleaned_text
+        raw_response: str | None = None
+        try:
+            prompt = self._build_prompt(source_text)
+            raw_response = self.client.generate(prompt)
+
+            logger.info(
+                "Raw AI response for message_id=%s: %r",
+                message_id,
+                raw_response[:500] if raw_response else "EMPTY",
+            )
+
+            parsed = self._extract_json_object(raw_response or "")
+
+            if parsed is None:
+                failure_kind = "invalid_json" if raw_response else "empty_response"
+                logger.warning(
+                    "Invalid/empty JSON from AI for processed_message_id=%s (kind=%s): %r",
+                    message_id,
+                    failure_kind,
+                    raw_response,
+                )
+                return _MessageWorkResult(
+                    message_id=message_id,
+                    source_text=source_text,
+                    raw_response=raw_response,
+                    failure_kind=failure_kind,
+                )
+
+            logger.info("Parsed JSON for message_id=%s: %s", message_id, str(parsed)[:200])
+            parsed["__source_text"] = source_text
+            normalized = self._validate_and_normalize(parsed)
+
+            if not str(normalized.get("summary") or "").strip():
+                normalized["summary"] = self._fallback_summary_from_text(source_text)
+            if not str(normalized.get("category") or "").strip():
+                normalized["category"] = "ecosystem_news"
+            try:
+                normalized["priority_score"] = max(
+                    1, min(10, int(normalized.get("priority_score", 3)))
+                )
+            except (TypeError, ValueError):
+                normalized["priority_score"] = 3
+            normalized["importance_score"] = self._normalize_importance_score(
+                normalized.get("importance_score", 0.3)
+            )
+            if "is_relevant" not in normalized:
+                normalized["is_relevant"] = True
+            normalized.setdefault("is_opportunity", False)
+            normalized.setdefault("opportunity_type", "")
+            normalized.setdefault("deadline_text", "")
+            normalized.setdefault("action_hint", "")
+            normalized.setdefault("confidence_score", 0.5)
+            normalized["analysis_provider"] = self.provider
+            normalized["analysis_status"] = "success"
+
+            metadata_json = json.dumps(normalized, ensure_ascii=False)
+
+            logger.info(
+                "Final normalized metadata for message_id=%s: %s",
+                message_id,
+                metadata_json[:200],
+            )
+
+            return _MessageWorkResult(
+                message_id=message_id,
+                source_text=source_text,
+                raw_response=raw_response,
+                normalized=normalized,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "Failed to analyze processed_message_id=%s: %s",
+                message_id,
+                exc,
+            )
+            return _MessageWorkResult(
+                message_id=message_id,
+                source_text=source_text,
+                raw_response=raw_response,
+                failure_kind="exception",
+                exception=exc,
+            )
+
+    def _persist_analysis_result(self, result: _MessageWorkResult) -> str:
+        """
+        Apply one message result to the database (main thread only).
+
+        Returns ``"analyzed"`` or ``"failed"``.
+        """
+        if result.failure_kind is not None:
+            self.repo.mark_processed_message_analysis_failed(
+                processed_message_id=result.message_id,
+                error_payload=self._build_failure_payload(
+                    kind=result.failure_kind,
+                    raw_response=result.raw_response,
+                    exception=result.exception,
+                ),
+                max_attempts=self.max_attempts,
+            )
+            return "failed"
+
+        normalized = result.normalized
+        if normalized is None:
+            self.repo.mark_processed_message_analysis_failed(
+                processed_message_id=result.message_id,
+                error_payload=self._build_failure_payload(
+                    kind="exception",
+                    raw_response=result.raw_response,
+                ),
+                max_attempts=self.max_attempts,
+            )
+            return "failed"
+
+        metadata_json = json.dumps(normalized, ensure_ascii=False)
+
+        logger.info("Saving analysis to DB for message_id=%s", result.message_id)
+
+        self.repo.update_processed_message_analysis(
+            processed_message_id=result.message_id,
+            classification=str(normalized["category"]),
+            importance_score=float(normalized["importance_score"]),
+            metadata_json=metadata_json,
+            provider=self.provider,
+        )
+
+        logger.info("Successfully saved analysis to DB for message_id=%s", result.message_id)
+        return "analyzed"
+
     def analyze(self) -> AnalysisStats:
         """
         Run one analysis pass and keep invalid outputs retryable.
@@ -335,96 +486,32 @@ class MessageAnalyzer:
             self.provider,
         )
 
+        max_workers = self._max_worker_threads()
+        logger.info(
+            "Running concurrent analysis with max_workers=%d (pool_size=%d)",
+            max_workers,
+            self.client.pool_size,
+        )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            work_results = list(executor.map(self._analyze_single_message, messages))
+
         analyzed = 0
         failed = 0
         attempted = 0
 
-        for msg in messages:
-            raw_response: str | None = None
+        for msg, result in zip(messages, work_results):
             try:
                 attempted += 1
                 self.repo.mark_processed_message_analysis_started(
                     processed_message_id=int(msg.id),
                     provider=self.provider,
                 )
-                prompt = self._build_prompt(msg.short_text or msg.cleaned_text)
-                raw_response = self.client.generate(prompt)
-
-                logger.info(
-                    "Raw AI response for message_id=%s: %r",
-                    msg.id,
-                    raw_response[:500] if raw_response else "EMPTY",
-                )
-
-                parsed = self._extract_json_object(raw_response or "")
-
-                if parsed is None:
-                    failure_kind = "invalid_json" if raw_response else "empty_response"
-                    logger.warning(
-                        "Invalid/empty JSON from AI for processed_message_id=%s (kind=%s): %r",
-                        msg.id,
-                        failure_kind,
-                        raw_response,
-                    )
-                    self.repo.mark_processed_message_analysis_failed(
-                        processed_message_id=int(msg.id),
-                        error_payload=self._build_failure_payload(
-                            kind=failure_kind,
-                            raw_response=raw_response,
-                        ),
-                        max_attempts=self.max_attempts,
-                    )
+                outcome = self._persist_analysis_result(result)
+                if outcome == "analyzed":
+                    analyzed += 1
+                else:
                     failed += 1
-                    continue
-
-                logger.info("Parsed JSON for message_id=%s: %s", msg.id, str(parsed)[:200])
-                parsed["__source_text"] = msg.short_text or msg.cleaned_text
-                normalized = self._validate_and_normalize(parsed)
-
-                if not str(normalized.get("summary") or "").strip():
-                    normalized["summary"] = self._fallback_summary_from_text(
-                        msg.short_text or msg.cleaned_text
-                    )
-                if not str(normalized.get("category") or "").strip():
-                    normalized["category"] = "ecosystem_news"
-                try:
-                    normalized["priority_score"] = max(
-                        1, min(10, int(normalized.get("priority_score", 3)))
-                    )
-                except (TypeError, ValueError):
-                    normalized["priority_score"] = 3
-                normalized["importance_score"] = self._normalize_importance_score(
-                    normalized.get("importance_score", 0.3)
-                )
-                if "is_relevant" not in normalized:
-                    normalized["is_relevant"] = True
-                normalized.setdefault("is_opportunity", False)
-                normalized.setdefault("opportunity_type", "")
-                normalized.setdefault("deadline_text", "")
-                normalized.setdefault("action_hint", "")
-                normalized.setdefault("confidence_score", 0.5)
-                normalized["analysis_provider"] = self.provider
-                normalized["analysis_status"] = "success"
-
-                metadata_json = json.dumps(normalized, ensure_ascii=False)
-
-                logger.info(
-                    "Final normalized metadata for message_id=%s: %s",
-                    msg.id,
-                    metadata_json[:200],
-                )
-                logger.info("Saving analysis to DB for message_id=%s", msg.id)
-
-                self.repo.update_processed_message_analysis(
-                    processed_message_id=int(msg.id),
-                    classification=str(normalized["category"]),
-                    importance_score=float(normalized["importance_score"]),
-                    metadata_json=metadata_json,
-                    provider=self.provider,
-                )
-
-                logger.info("Successfully saved analysis to DB for message_id=%s", msg.id)
-                analyzed += 1
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "Failed to analyze processed_message_id=%s: %s",
@@ -435,7 +522,7 @@ class MessageAnalyzer:
                     processed_message_id=int(getattr(msg, "id", 0)),
                     error_payload=self._build_failure_payload(
                         kind="exception",
-                        raw_response=raw_response,
+                        raw_response=result.raw_response,
                         exception=exc,
                     ),
                     max_attempts=self.max_attempts,

@@ -77,6 +77,11 @@ class AIClient(BaseAIClient):
     Failed keys are temporarily skipped on rate-limit or auth errors.
     """
 
+    @property
+    def pool_size(self) -> int:
+        """Number of configured API key slots in the rotation pool."""
+        return len(self._slots)
+
     def __init__(self) -> None:
         self._slots = _build_key_pool()
         self._index = 0
@@ -121,25 +126,27 @@ class AIClient(BaseAIClient):
 
     def _get_client(self, slot: APIKeySlot) -> OpenAI:
         cache_key = f"{slot.provider.value}:{slot.api_key}"
-        if cache_key in self._clients:
-            return self._clients[cache_key]
+        with self._lock:
+            cached = self._clients.get(cache_key)
+            if cached is not None:
+                return cached
 
-        default_headers: Dict[str, str] = {}
-        if slot.provider == Provider.OPENROUTER:
-            site_url = os.getenv("OPENROUTER_SITE_URL", "").strip()
-            app_name = os.getenv("OPENROUTER_APP_NAME", "").strip()
-            if site_url:
-                default_headers["HTTP-Referer"] = site_url
-            if app_name:
-                default_headers["X-OpenRouter-Title"] = app_name
+            default_headers: Dict[str, str] = {}
+            if slot.provider == Provider.OPENROUTER:
+                site_url = os.getenv("OPENROUTER_SITE_URL", "").strip()
+                app_name = os.getenv("OPENROUTER_APP_NAME", "").strip()
+                if site_url:
+                    default_headers["HTTP-Referer"] = site_url
+                if app_name:
+                    default_headers["X-OpenRouter-Title"] = app_name
 
-        client = OpenAI(
-            api_key=slot.api_key,
-            base_url=self._base_url_for(slot),
-            default_headers=default_headers or None,
-        )
-        self._clients[cache_key] = client
-        return client
+            client = OpenAI(
+                api_key=slot.api_key,
+                base_url=self._base_url_for(slot),
+                default_headers=default_headers or None,
+            )
+            self._clients[cache_key] = client
+            return client
 
     @staticmethod
     def _is_key_error(exc: Exception) -> bool:
