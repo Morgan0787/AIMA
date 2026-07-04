@@ -27,6 +27,9 @@ SECTION_ORDER = ["OPPORTUNITIES", "TOP NEWS", "JOBS", "EVENTS"]
 STRICT_IMPORTANCE_THRESHOLD = 0.6
 RELAXED_IMPORTANCE_THRESHOLD = 0.45
 FALLBACK_IMPORTANCE_THRESHOLD = 0.3
+STRICT_PRIORITY_THRESHOLD = 6
+RELAXED_PRIORITY_THRESHOLD = 4
+FALLBACK_PRIORITY_THRESHOLD = 2
 RECENT_DIGEST_SUPPRESSION_DAYS = 7
 INTRA_DIGEST_DUPLICATE_THRESHOLD = 0.62
 RECENT_DIGEST_DUPLICATE_THRESHOLD = 0.84
@@ -147,6 +150,13 @@ class DigestBuilder:
             return None
         return data if isinstance(data, dict) else None
 
+    def _priority_threshold_for_importance(self, importance_threshold: float) -> int:
+        if importance_threshold >= STRICT_IMPORTANCE_THRESHOLD:
+            return STRICT_PRIORITY_THRESHOLD
+        if importance_threshold >= RELAXED_IMPORTANCE_THRESHOLD:
+            return RELAXED_PRIORITY_THRESHOLD
+        return FALLBACK_PRIORITY_THRESHOLD
+
     def _build_opportunity_fallback_digest(self) -> DigestBuildResult:
         """Build a product-safe digest fallback from active opportunities."""
         cfg = get_config()
@@ -194,7 +204,7 @@ class DigestBuilder:
             title=title,
         )
 
-    def _filter_items_strict(self, rows: List[Dict[str, Any]], threshold_used: int) -> tuple[List[DigestItem], Dict[str, int]]:
+    def _filter_items_strict(self, rows: List[Dict[str, Any]], priority_threshold: int) -> tuple[List[DigestItem], Dict[str, int]]:
         """
         Apply strict filtering to digest candidates.
         """
@@ -248,7 +258,7 @@ class DigestBuilder:
                 priority = 1
             priority = max(1, min(10, priority))
 
-            if priority < threshold_used:
+            if priority < priority_threshold:
                 rejections['priority_below_threshold'] += 1
                 continue
             if category == "ecosystem_news" and priority < 8:
@@ -304,7 +314,7 @@ class DigestBuilder:
         
         return items, rejections
 
-    def _filter_items_relaxed(self, rows: List[Dict[str, Any]], threshold_used: int) -> tuple[List[DigestItem], Dict[str, int]]:
+    def _filter_items_relaxed(self, rows: List[Dict[str, Any]], priority_threshold: int) -> tuple[List[DigestItem], Dict[str, int]]:
         """
         Apply relaxed filtering to digest candidates.
         """
@@ -365,7 +375,7 @@ class DigestBuilder:
             priority = max(1, min(10, priority))
 
             # Relaxed priority: lower threshold by 2 points
-            relaxed_threshold = max(1, threshold_used - 2)
+            relaxed_threshold = max(1, priority_threshold - 2)
             if priority < relaxed_threshold:
                 rejections['priority_below_threshold'] += 1
                 continue
@@ -533,7 +543,7 @@ class DigestBuilder:
         else:
             logger.info("Normal mode: reuse_analyzed_messages=disabled - only new messages will be used")
 
-        def _fetch_candidates(max_age_days: int) -> tuple[List[Dict[str, Any]], int]:
+        def _fetch_candidates(max_age_days: int) -> tuple[List[Dict[str, Any]], float]:
             rows = self.repo.get_digest_candidates_with_threshold(
                 min_importance=STRICT_IMPORTANCE_THRESHOLD,
                 limit=self.candidate_limit,
@@ -562,18 +572,20 @@ class DigestBuilder:
             )
             return rows, FALLBACK_IMPORTANCE_THRESHOLD
 
-        rows, threshold_used = _fetch_candidates(recent_days)
+        rows, importance_threshold = _fetch_candidates(recent_days)
         rows_loaded_initial = len(rows)
         recency_used = recent_days  # Initialize before any fallback logic
 
         # If we don't have enough *recent* items, relax recency to 7 days.
         if len(rows) < 3 and recent_days < 7:
-            rows, threshold_used = _fetch_candidates(7)
+            rows, importance_threshold = _fetch_candidates(7)
             recency_used = 7
 
         rows_loaded = len(rows)
+        priority_threshold = self._priority_threshold_for_importance(importance_threshold)
 
-        logger.info("Digest threshold used: %.2f", threshold_used)
+        logger.info("Digest importance threshold used: %.2f", importance_threshold)
+        logger.info("Digest priority threshold used: %d", priority_threshold)
         logger.info("Digest recency window used: %d days", recency_used)
         logger.info("Rows loaded from database: %d", rows_loaded)
 
@@ -600,13 +612,13 @@ class DigestBuilder:
             'channel_diversity': 0,
         }
         
-        strict_items, strict_rejections = self._filter_items_strict(rows, threshold_used)
+        strict_items, strict_rejections = self._filter_items_strict(rows, priority_threshold)
         logger.info("Strict mode yielded %d items", len(strict_items))
         
         # If strict mode yields too few items, try relaxed mode
         if len(strict_items) < 5:
             logger.info("Too few items in strict mode, trying relaxed mode")
-            relaxed_items, relaxed_rejections = self._filter_items_relaxed(rows, threshold_used)
+            relaxed_items, relaxed_rejections = self._filter_items_relaxed(rows, priority_threshold)
             logger.info("Relaxed mode yielded %d items", len(relaxed_items))
             
             # If relaxed mode still yields too few items, try fallback mode

@@ -31,33 +31,10 @@ class TelegramConfig:
 
 
 @dataclass
-class OllamaConfig:
-    """Settings related to the local Ollama runtime."""
-
-    base_url: str
-    model: str
-
-
-@dataclass
 class AIConfig:
     """Top-level AI provider selection."""
 
-    provider: str = "ollama"
-
-
-@dataclass
-class GeminiConfig:
-    """Settings related to Google Gemini via the official GenAI SDK."""
-
-    model: str = "gemini-2.0-flash"
-
-
-@dataclass
-class OpenAIConfig:
-    """Settings related to OpenAI's chat completions API."""
-
-    model: str = "gpt-4o-mini"
-    base_url: str = "https://api.openai.com/v1"
+    provider: str = "cloud"
 
 
 @dataclass
@@ -91,10 +68,7 @@ class JarvisConfig:
     """Top-level configuration structure for Jarvis v2."""
 
     telegram: TelegramConfig
-    ollama: OllamaConfig
     ai: AIConfig
-    gemini: GeminiConfig
-    openai: OpenAIConfig
     delivery: DeliveryConfig
     debug: DebugConfig
     opportunity: OpportunityConfig
@@ -152,22 +126,8 @@ def get_config() -> JarvisConfig:
         channels=list(raw.get("telegram", {}).get("channels", [])),
     )
 
-    ollama_cfg = OllamaConfig(
-        base_url=str(raw.get("ollama", {}).get("base_url", "http://localhost:11434")),
-        model=str(raw.get("ollama", {}).get("model", "gemma3:4b")),
-    )
-
     ai_cfg = AIConfig(
         provider=str(raw.get("ai", {}).get("provider", AIConfig().provider)),
-    )
-
-    gemini_cfg = GeminiConfig(
-        model=str(raw.get("gemini", {}).get("model", GeminiConfig().model)),
-    )
-
-    openai_cfg = OpenAIConfig(
-        model=str(raw.get("openai", {}).get("model", OpenAIConfig().model)),
-        base_url=str(raw.get("openai", {}).get("base_url", OpenAIConfig().base_url)),
     )
 
     delivery_cfg = DeliveryConfig(
@@ -195,10 +155,7 @@ def get_config() -> JarvisConfig:
 
     _cached_config = JarvisConfig(
         telegram=telegram_cfg,
-        ollama=ollama_cfg,
         ai=ai_cfg,
-        gemini=gemini_cfg,
-        openai=openai_cfg,
         delivery=delivery_cfg,
         debug=debug_cfg,
         opportunity=opportunity_cfg,

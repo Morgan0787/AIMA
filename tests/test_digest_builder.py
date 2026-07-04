@@ -72,6 +72,30 @@ class FakeRepo:
 
 
 class DigestBuilderTests(unittest.TestCase):
+    def test_build_applies_priority_threshold_from_importance_tier(self) -> None:
+        strict_rows = [
+            _candidate_row(
+                processed_message_id,
+                category="grant",
+                summary=f"Grant opportunity number {processed_message_id} with deadline",
+                importance_score=0.7,
+                priority_score=5 if processed_message_id <= 3 else 7,
+            )
+            for processed_message_id in range(1, 6)
+        ]
+        fake_repo = FakeRepo(candidate_rows_by_threshold={0.6: strict_rows})
+
+        with patch("app.digest.digest_builder.get_config", return_value=_config()):
+            builder = DigestBuilder(max_items=10, candidate_limit=10)
+            builder.repo = fake_repo
+            result = builder.build()
+
+        self.assertGreaterEqual(result.items_count, 1)
+        self.assertNotIn("Grant opportunity number 1", result.digest_text)
+        self.assertTrue(
+            any(f"Grant opportunity number {item_id}" in result.digest_text for item_id in (4, 5))
+        )
+
     def test_build_walks_normalized_importance_thresholds(self) -> None:
         strict_rows = [
             _candidate_row(1, category="grant", summary="Grant for climate startups", importance_score=0.7),

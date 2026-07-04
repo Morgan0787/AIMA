@@ -7,6 +7,11 @@ from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
 from ..core.config import get_config
+from ..core.score_normalization import (
+    HIGH_IMPORTANCE_THRESHOLD,
+    importance_opportunity_contribution,
+    normalize_importance_score,
+)
 from ..core.logger import get_logger
 from ..opportunity.lifecycle import assess_opportunity_lifecycle, parse_deadline_date
 from ..storage.repository import Repository
@@ -344,10 +349,7 @@ class OpportunityHunter:
             priority = int(metadata.get("priority_score", 1))
         except (TypeError, ValueError):
             priority = 1
-        try:
-            importance = int(metadata.get("importance_score", 1))
-        except (TypeError, ValueError):
-            importance = 1
+        importance = normalize_importance_score(metadata.get("importance_score", 0.3))
         try:
             actionability = int(metadata.get("actionability_score", 1))
         except (TypeError, ValueError):
@@ -373,7 +375,7 @@ class OpportunityHunter:
             reasons.append("relevant")
         if priority >= 7:
             confidence += 0.05
-        if importance >= 7:
+        if importance >= HIGH_IMPORTANCE_THRESHOLD:
             confidence += 0.05
         if actionability >= 6:
             confidence += 0.05
@@ -440,10 +442,9 @@ class OpportunityHunter:
             priority = int(metadata.get("priority_score", 1))
         except (TypeError, ValueError):
             priority = 1
-        try:
-            importance = int(metadata.get("importance_score", 1))
-        except (TypeError, ValueError):
-            importance = 1
+        importance_contribution = importance_opportunity_contribution(
+            metadata.get("importance_score", 0.3)
+        )
         try:
             actionability = int(metadata.get("actionability_score", 1))
         except (TypeError, ValueError):
@@ -463,7 +464,7 @@ class OpportunityHunter:
                     boost += 0.5
             except ValueError:
                 pass
-        return float(priority + importance * 0.5 + actionability * 0.5 + boost)
+        return float(priority + importance_contribution + actionability * 0.5 + boost)
 
     def _refresh_existing_statuses(self) -> None:
         """Expire active opportunities whose deadline has already passed."""
@@ -616,7 +617,11 @@ class OpportunityHunter:
             deadline_dt = self._parse_deadline_date(deadline_text, None) if deadline_text else None
             urgency = 0.0
             if deadline_dt is not None:
-                days_left = (deadline_dt - now_naive).total_seconds() / 86400.0
+                deadline_naive = deadline_dt.replace(tzinfo=None)
+                now_naive_clean = (
+                    now_naive.replace(tzinfo=None) if hasattr(now_naive, "replace") else now_naive
+                )
+                days_left = (deadline_naive - now_naive_clean).total_seconds() / 86400.0
                 if 0 <= days_left <= 3:
                     urgency += 3.0
                 elif 0 <= days_left <= 7:
@@ -640,7 +645,13 @@ class OpportunityHunter:
             deadline_dt = self._parse_deadline_date(deadline_text, None) if deadline_text else None
             if deadline_dt is None:
                 continue
-            days_left = (deadline_dt - now_naive).total_seconds() / 86400.0
+            deadline_naive_rep = deadline_dt.replace(tzinfo=None) if deadline_dt else None
+            now_naive_rep = now_naive.replace(tzinfo=None) if hasattr(now_naive, "replace") else now_naive
+            days_left = (
+                (deadline_naive_rep - now_naive_rep).total_seconds() / 86400.0
+                if (deadline_naive_rep and now_naive_rep)
+                else 0.0
+            )
             if 0 <= days_left <= 7:
                 urgent_rows.append(row)
 

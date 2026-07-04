@@ -18,21 +18,9 @@
       "@stanbasetech"
     ]
   },
-  "ollama": {
-    "base_url": "http://localhost:11434",
-    "model": "gemma3:4b"
-  },
   "digest_max_age_days": 3,
   "ai": {
-    "provider": "gemini",
-    "model": "models/gemini-1.5-flash"
-  },
-  "gemini": {
-    "model": "models/gemini-1.5-flash"
-  },
-  "openai": {
-    "model": "openai/gpt-4o-mini",
-    "base_url": "https://openrouter.ai/api/v1"
+    "provider": "cloud"
   },
   "opportunity": {
     "enabled": true,
