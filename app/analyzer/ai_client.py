@@ -165,13 +165,14 @@ class AIClient(BaseAIClient):
             return True
         if isinstance(exc, APIError):
             status_code = getattr(exc, "status_code", None)
-            if status_code in {400, 401, 403, 404, 429, 500, 502, 503}:
+            if status_code in {400, 401, 402, 403, 404, 429, 500, 502, 503}:
                 return True
         err_text = str(exc).lower()
         return any(
             token in err_text
             for token in (
                 "400",
+                "402",
                 "404",
                 "429",
                 "rate limit",
@@ -180,6 +181,7 @@ class AIClient(BaseAIClient):
                 "authentication",
                 "invalid api key",
                 "permission denied",
+                "payment required",
                 "not found",
                 "decommissioned",
                 "model_decommissioned",

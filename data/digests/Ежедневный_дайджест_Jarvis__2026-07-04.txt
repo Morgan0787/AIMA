@@ -2,38 +2,38 @@
 
 ВОЗМОЖНОСТИ
 -----------
-1. Учредителю President Tech Award 2026 предлагается $5 миллионов на развитие стартапов
-   Источник: @itpark_uz
-   Ссылка: https://t.me/itpark_uz/20150
-
-2. Подача заявок в MassChallenge Accelerator заканчивается 5 июля
+1. Акселератор для агропроектов в Нукусе с обучением и призом 30 млн сумов
    Источник: @startupchoyxona
-   Ссылка: https://t.me/startupchoyxona/3423
-
-3. Startup Garage’da har hafta istiqbolli startuplar o‘z g‘oyalarini taqdim etib, ekspertlar va hamjamiyat tomonidan baholanadi
-   Источник: @startupgarage_uz
-   Ссылка: https://t.me/startupgarage_uz/1523
-
-4. В Jizzaxе завершился Umummilliy AI Hackathon, победители объявлены
-   Источник: @itpark_uz
-   Ссылка: https://t.me/itpark_uz/20141
+   Ссылка: https://t.me/startupchoyxona/3420
 
 ГЛАВНОЕ
 -------
-5. Google открыл бесплатный доступ к Gemini API с контекстом до 1 млн токенов
+2. Бесплатные API-кредиты для GPT 5.
    Источник: @startupchoyxona
-   Ссылка: https://t.me/startupchoyxona/3422
+   Ссылка: https://t.me/startupchoyxona/3417
 
-6. IT Park Uzbekistan o‘zbek startaplari uchun xalqaro imkoniyatlarni kengaytirish, venchur investitsiyalarni jalb qilish, global bozorlarga
+3. Yangi suhbat efirda AloqaVentures direktori o‘rinbosari Mirolim Abdullayev AloqaVentures faoliyatidagi so‘nggi o‘zgarishlar haqida suhbatlashdi
+   Источник: @aloqaventures
+   Ссылка: https://t.me/aloqaventures/1475
+
+4. Ракамти технологий министр Шерзод Шерматов встретился с Qatarning MBK Holding asoschisi va boshqaruv raisi Shayx
    Источник: @mitcuz
-   Ссылка: https://t.me/mitcuz/23658
+   Ссылка: https://t.me/mitcuz/23627
 
-7. Cube of Skill game studiyasi yangi loyihasi — HitTube Demo'ni taqdim etdi
-   Источник: @startupbaseuz
-   Ссылка: https://t.me/startupbaseuz/8448
+5. В Ташкенте прошел круглый стол по развитию GameDev и анимации в Узбекистане
+   Источник: @mitcuz
+   Ссылка: https://t.me/mitcuz/23683
 
 СОБЫТИЯ
 -------
-8. Startup Garage Grand Demo Day: новая возможность для стартапов
-   Источник: @startupgarage_uz
-   Ссылка: https://t.me/startupgarage_uz/1524
+6. В Goethe-Institut Tashkent 3 июля состоится событие GameDev Goethe Season 7
+   Источник: @itpark_uz
+   Ссылка: https://t.me/itpark_uz/20139
+
+7. В Jizzax проходит Umummilliy AI Hackathon, где сильные команды готовятся к финалу
+   Источник: @itpark_uz
+   Ссылка: https://t.me/itpark_uz/20129
+
+8. В Qoraqalpog‘istоне состоялся «День инвесторов», где стартапы представили свои идеи инвесторам
+   Источник: @aloqaventures
+   Ссылка: https://t.me/aloqaventures/1474
