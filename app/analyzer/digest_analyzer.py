@@ -3,7 +3,7 @@ Digest analysis and generation for Jarvis v2 Core.
 
 This module will:
 - Take cleaned, deduplicated, and ranked messages
-- Use prompts and the local LLM (Ollama) to build a daily digest
+- Use prompts and the cloud AI pool to build a daily digest
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 
-from .ollama_client import OllamaClient
+from .ai_client import AIClient
 from ..core.logger import get_logger
 from ..core.utils import get_project_root
 
@@ -21,11 +21,11 @@ logger = get_logger(__name__)
 
 class DigestAnalyzer:
     """
-    High-level interface for turning messages into a digest using Ollama.
+    High-level interface for turning messages into a digest using the cloud AI pool.
     """
 
     def __init__(self) -> None:
-        self.client = OllamaClient()
+        self.client = AIClient()
 
     def _load_prompt(self, filename: str) -> str:
         """
@@ -55,4 +55,3 @@ class DigestAnalyzer:
 
         # TODO: Refine the prompt structure and parsing of the response.
         return self.client.generate(prompt)
-
