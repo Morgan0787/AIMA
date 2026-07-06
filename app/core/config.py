@@ -10,11 +10,15 @@ This module provides a small helper to load it as a Python dictionary.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
+from dotenv import load_dotenv
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .utils import get_project_root, ensure_directory
+
+load_dotenv()
 
 
 CONFIG_RELATIVE_PATH = Path("config") / "settings.json"
@@ -119,9 +123,32 @@ def get_config() -> JarvisConfig:
         "path", "data/jarvis.db"
     )
 
+    env_api_id = os.getenv("TELEGRAM_API_ID", "").strip()
+    env_api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
+
+    if env_api_id or env_api_hash:
+        if not env_api_id or not env_api_hash:
+            raise ValueError(
+                "Both TELEGRAM_API_ID and TELEGRAM_API_HASH must be set if either is present in the environment."
+            )
+        try:
+            telegram_api_id = int(env_api_id)
+        except ValueError as exc:
+            raise ValueError("TELEGRAM_API_ID must be an integer.") from exc
+        telegram_api_hash = env_api_hash
+    else:
+        telegram_api_id = int(raw.get("telegram", {}).get("api_id", 0))
+        telegram_api_hash = str(raw.get("telegram", {}).get("api_hash", ""))
+
+    if telegram_api_id <= 0 or not telegram_api_hash:
+        raise ValueError(
+            "Telegram API credentials are not configured. "
+            "Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env or add them to config/settings.json."
+        )
+
     telegram_cfg = TelegramConfig(
-        api_id=int(raw.get("telegram", {}).get("api_id", 0)),
-        api_hash=str(raw.get("telegram", {}).get("api_hash", "")),
+        api_id=telegram_api_id,
+        api_hash=telegram_api_hash,
         session_name=str(raw.get("telegram", {}).get("session_name", "jarvis_session")),
         channels=list(raw.get("telegram", {}).get("channels", [])),
     )

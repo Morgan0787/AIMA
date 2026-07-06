@@ -57,3 +57,4 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+config/settings.json
