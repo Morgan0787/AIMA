@@ -7,12 +7,16 @@ from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
 from ..core.config import get_config
+from ..core.logger import get_logger
 from ..core.score_normalization import (
     HIGH_IMPORTANCE_THRESHOLD,
     importance_opportunity_contribution,
     normalize_importance_score,
 )
-from ..core.logger import get_logger
+from ..core.text_similarity import (
+    build_signature,
+    signature_similarity,
+)
 from ..opportunity.lifecycle import assess_opportunity_lifecycle, parse_deadline_date
 from ..storage.repository import Repository
 
@@ -631,6 +635,30 @@ class OpportunityHunter:
             return float(row.get("score") or 0.0) + urgency
 
         filtered_rows.sort(key=_urgency_score, reverse=True)
+
+        deduped_rows: List[Dict[str, Any]] = []
+        kept_signatures: List[Dict[str, Any]] = []
+        removed_duplicates = 0
+        for row in filtered_rows:
+            summary = str(row.get("summary") or "").strip()
+            row_signature = build_signature(summary)
+            is_duplicate = False
+            for kept_row, kept_signature in zip(deduped_rows, kept_signatures):
+                if signature_similarity(row_signature, kept_signature) >= 0.6:
+                    is_duplicate = True
+                    if (row.get("score") or 0.0) > (kept_row.get("score") or 0.0):
+                        kept_idx = deduped_rows.index(kept_row)
+                        deduped_rows[kept_idx] = row
+                        kept_signatures[kept_idx] = row_signature
+                    break
+            if is_duplicate:
+                removed_duplicates += 1
+                continue
+            deduped_rows.append(row)
+            kept_signatures.append(row_signature)
+
+        filtered_rows = deduped_rows
+        logger.info("Opportunity hunter removed %d duplicate/similar opportunities.", removed_duplicates)
 
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for row in filtered_rows:
