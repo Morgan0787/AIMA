@@ -84,6 +84,25 @@ def parse_deadline_date(deadline_text: str, reference_date: datetime | None = No
     if not text:
         return None
 
+    no_deadline_phrases = (
+        "24/7",
+        "24х7",
+        "круглосуточно",
+        "постоянно",
+        "без дедлайна",
+        "без ограничений",
+        "бессрочно",
+        "always",
+        "ongoing",
+        "rolling",
+        "continuously",
+        "открыто всегда",
+        "open ended",
+        "open-ended",
+    )
+    if any(phrase in text for phrase in no_deadline_phrases):
+        return None
+
     import re
 
     match = re.search(r"(\d{1,2})\s*[-\u2013\u2014]\s*(\d{1,2})\s+([\u0400-\u04FFA-Za-z]+)(?:\s+(\d{4}))?", text)

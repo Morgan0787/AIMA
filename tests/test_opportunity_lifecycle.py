@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.digest.digest_builder import DigestBuilder
+from app.opportunity.lifecycle import parse_deadline_date
 from app.search.search_engine import SearchEngine
 from app.storage.repository import Repository
 
@@ -202,6 +203,9 @@ class OpportunityLifecycleTests(unittest.TestCase):
             self.assertEqual(cur.fetchone()[0], "expired")
         finally:
             conn.close()
+
+    def test_parse_deadline_date_rejects_ongoing_phrases(self) -> None:
+        self.assertIsNone(parse_deadline_date("24/7"))
 
     def test_digest_fallback_uses_live_opportunities_only(self) -> None:
         config = SimpleNamespace(

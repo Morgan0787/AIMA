@@ -692,7 +692,7 @@ class OpportunityHunter:
                 channel = row.get("channel_username") or "@unknown"
                 lines.append(f"   Источник: @{str(channel).lstrip('@')}")
                 deadline_text = str(metadata.get("deadline_text") or row.get("deadline_text") or "").strip()
-                if deadline_text:
+                if deadline_text and self._parse_deadline_date(deadline_text, None) is not None:
                     lines.append(f"   Дедлайн/дата: {deadline_text}")
                 action_hint = str(metadata.get('action_hint') or '').strip() or "Подробнее по ссылке"
                 lines.append(f"   Действие: {action_hint}")

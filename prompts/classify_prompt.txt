@@ -99,5 +99,6 @@ other
 - is_opportunity = true
 - opportunity_type = один короткий тип, например: grant, accelerator, hackathon, job, internship, event, competition, open_call
 - deadline_text = дедлайн или дата, если видна в тексте
+- если приём/регистрация открыт постоянно/24/7/без конкретной даты, оставляй deadline_text пустым, а не пиши «24/7», «постоянно» и т.п.
 - action_hint = очень коротко, что делать: "подать заявку", "зарегистрироваться", "отправить резюме"
 - confidence_score = от 0 до 1
