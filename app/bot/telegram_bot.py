@@ -350,11 +350,33 @@ def _normalize_interest_list(raw: str) -> list[str]:
     return values
 
 
-def _preferred_query(user_id: int) -> str | None:
-    last_query = MEMORY.get_last_query(user_id)
-    if last_query:
-        return last_query
+def _boost_results_by_interests(results: list[SearchResult], user_id: int) -> list[SearchResult]:
+    if not results:
+        return results
 
+    interests = MEMORY.get_interests(user_id)
+    if not interests:
+        return results
+
+    interest_terms = [interest.lower() for interest in interests if interest]
+    if not interest_terms:
+        return results
+
+    def match_score(item: SearchResult) -> int:
+        blob = " ".join(
+            [
+                item.summary or "",
+                item.category or "",
+                item.action_hint or "",
+                item.deadline_text or "",
+            ]
+        ).lower()
+        return sum(1 for term in interest_terms if term and term in blob)
+
+    return sorted(results, key=lambda item: match_score(item), reverse=True)
+
+
+def _preferred_query(user_id: int) -> str | None:
     interests = MEMORY.get_interests(user_id)
     if not interests:
         return None
@@ -362,27 +384,6 @@ def _preferred_query(user_id: int) -> str | None:
 
 
 def _contextual_search_results(user_id: int, mode: str):
-    last_query = _preferred_query(user_id)
-    if not last_query:
-        return None, None
-
-    if mode == "urgent":
-        results = SEARCH_SERVICE.search(last_query, user_id=user_id)
-        results = [r for r in results if getattr(r, "deadline_text", None)][:5]
-        title = f"🔥 Срочно • {last_query}"
-        return results, title
-
-    if mode == "deadline":
-        results = SEARCH_SERVICE.search(last_query, user_id=user_id)
-        results = [r for r in results if getattr(r, "deadline_text", None)][:5]
-        title = f"⏳ Дедлайны • {last_query}"
-        return results, title
-
-    if mode == "top":
-        results = SEARCH_SERVICE.search(last_query, user_id=user_id)[:5]
-        title = f"🚀 Топ • {last_query}"
-        return results, title
-
     return None, None
 
 
@@ -453,34 +454,27 @@ def _build_opportunities_response() -> tuple[str, InlineKeyboardMarkup, bool]:
 
 
 def _build_urgent_response(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    results, title = _contextual_search_results(user_id, "urgent")
-    if not results:
-        results = OPPORTUNITY_SERVICE.get_urgent(limit=5)
-        title = "🔥 Срочно"
+    results = OPPORTUNITY_SERVICE.get_urgent(limit=5)
+    results = _boost_results_by_interests(results, user_id)
+    title = "🔥 Срочно"
     if not results:
         return "Сейчас нет срочных возможностей.", home_inline_keyboard()
     return _format_results_block(title, results, include_deadline=True), result_nav_keyboard(results, kind="default")
 
 
 def _build_top_response(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
-    results, title = _contextual_search_results(user_id, "top")
-    if not results:
-        results = OPPORTUNITY_SERVICE.get_top(limit=3)
-        title = "🚀 Топ"
+    results = OPPORTUNITY_SERVICE.get_top(limit=5)
+    results = _boost_results_by_interests(results, user_id)
+    title = "🚀 Топ"
     if not results:
         return "Пока нет активных возможностей.", home_inline_keyboard()
     return _format_results_block(title, results, include_deadline=True), result_nav_keyboard(results, kind="default")
 
 
 def _build_deadline_response(user_id: int, days: int) -> tuple[str, InlineKeyboardMarkup]:
-    if days == 7:
-        results, title = _contextual_search_results(user_id, "deadline")
-    else:
-        results, title = None, None
-
-    if not results:
-        results = OPPORTUNITY_SERVICE.get_deadlines(days=days, limit=5)
-        title = "📅 Дедлайны на сегодня" if days == 1 else f"⏳ Дедлайны на ближайшие {days} дн."
+    results = OPPORTUNITY_SERVICE.get_deadlines(days=days, limit=5)
+    results = _boost_results_by_interests(results, user_id)
+    title = "📅 Дедлайны на сегодня" if days == 1 else f"⏳ Дедлайны на ближайшие {days} дн."
 
     if not results:
         return (
