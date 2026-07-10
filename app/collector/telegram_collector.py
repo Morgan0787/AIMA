@@ -23,6 +23,10 @@ from telethon import TelegramClient
 from telethon.errors import RPCError
 from telethon.tl.custom import Message
 
+
+class _UnauthorizedSessionError(RuntimeError):
+    """Raised when Telegram access is not authorized for this session."""
+
 from ..core.config import get_config
 from ..core.logger import get_logger
 from ..core.utils import ensure_directory, get_project_root
@@ -115,9 +119,11 @@ class TelegramCollector:
         has_history = False
 
         logger.info("Connecting to Telegram...")
-        async with client:
-            # `start()` will prompt for login (phone/code) if no session exists yet.
-            await client.start()
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.warning("Telegram session is not authorized; skipping collection.")
+                return CollectionResult(total_new_messages=0, per_channel_counts=[])
 
             # If there are any channels with known cursor (last_message_id),
             # we consider the DB initialized and collect incrementally.
@@ -206,6 +212,12 @@ class TelegramCollector:
                     logger.exception("Failed collecting from channel '%s': %s", channel_username, e)
                     per_channel_counts.append((f"@{channel_username}", 0))
                     continue
+
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                logger.exception("Failed to disconnect Telegram client cleanly.")
 
         return CollectionResult(total_new_messages=total_new, per_channel_counts=per_channel_counts)
 

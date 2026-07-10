@@ -233,61 +233,6 @@ class OpportunityHunter:
         self, deadline_text: str, reference_date: Optional[datetime]
     ) -> Optional[datetime]:
         return parse_deadline_date(deadline_text, reference_date=reference_date)
-        if not deadline_text:
-            return None
-        ref = reference_date or datetime.now(UTC).replace(tzinfo=None)
-        t = deadline_text.lower().strip()
-
-        m = re.search(r"(\d{1,2})\s*[-\u2013\u2014]\s*(\d{1,2})\s+([\u0400-\u04FFA-Za-z]+)(?:\s+(\d{4}))?", t)
-        if m:
-            day = int(m.group(1))
-            month_word = m.group(3).lower()
-            year = int(m.group(4) or ref.year)
-            month = None
-            for key, value in MONTHS.items():
-                if month_word.startswith(key):
-                    month = value
-                    break
-            if month:
-                try:
-                    dt = datetime(year, month, day)
-                    if not m.group(4) and dt < ref.replace(hour=0, minute=0, second=0, microsecond=0):
-                        dt = datetime(year + 1, month, day)
-                    return dt
-                except ValueError:
-                    return None
-
-        m = re.search(r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?", t)
-        if m:
-            day = int(m.group(1))
-            month = int(m.group(2))
-            year = int(m.group(3) or ref.year)
-            if year < 100:
-                year += 2000
-            try:
-                return datetime(year, month, day)
-            except ValueError:
-                return None
-
-        m = re.search(r"(\d{1,2})\s+([А-Яа-яA-Za-z]+)(?:\s+(\d{4}))?", t)
-        if m:
-            day = int(m.group(1))
-            month_word = m.group(2).lower()
-            year = int(m.group(3) or ref.year)
-            month = None
-            for key, value in MONTHS.items():
-                if month_word.startswith(key):
-                    month = value
-                    break
-            if month:
-                try:
-                    dt = datetime(year, month, day)
-                    if not m.group(3) and dt < ref.replace(hour=0, minute=0, second=0, microsecond=0):
-                        dt = datetime(year + 1, month, day)
-                    return dt
-                except ValueError:
-                    return None
-        return None
 
     def _infer_opportunity_type(self, metadata: Dict[str, Any], text: str) -> str:
         category = str(metadata.get("opportunity_type") or metadata.get("category") or "").strip().lower()
