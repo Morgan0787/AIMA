@@ -534,6 +534,7 @@ async def _safe_chat_error(target, text: str, reply_markup=None) -> None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    MEMORY.register_user(update.effective_user.id)
     await _send_text(update.message, _home_text(), reply_markup=MENU_MARKUP)
 
 
@@ -687,6 +688,18 @@ async def clearinterests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     MEMORY.clear_interests(user_id)
     await _send_text(update.message, "🧹 Интересы очищены.", reply_markup=MENU_MARKUP)
+
+
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    MEMORY.set_digest_opt_in(user_id, False)
+    await _send_text(update.message, "Ежедневная рассылка отключена. Включить снова: /subscribe", reply_markup=MENU_MARKUP)
+
+
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    MEMORY.set_digest_opt_in(user_id, True)
+    await _send_text(update.message, "Ежедневная рассылка включена.", reply_markup=MENU_MARKUP)
 
 
 async def unsave(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1036,6 +1049,8 @@ def run_bot():
     app.add_handler(CommandHandler("setinterests", setinterests))
     app.add_handler(CommandHandler("myinterests", myinterests))
     app.add_handler(CommandHandler("clearinterests", clearinterests))
+    app.add_handler(CommandHandler("subscribe", subscribe))
+    app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     app.add_handler(CommandHandler("unsave", unsave))
 
     app.add_handler(CallbackQueryHandler(handle_inline_buttons))

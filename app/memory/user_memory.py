@@ -45,6 +45,15 @@ class UserMemory:
             )
         """)
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                digest_opt_in INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+
         conn.commit()
         conn.close()
 
@@ -118,6 +127,42 @@ class UserMemory:
         cur.execute("DELETE FROM user_interests WHERE user_id=?", (user_id,))
         conn.commit()
         conn.close()
+
+    def register_user(self, user_id: int) -> None:
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+            (user_id,),
+        )
+        cur.execute(
+            "UPDATE users SET last_seen_at=CURRENT_TIMESTAMP WHERE user_id=?",
+            (user_id,),
+        )
+        conn.commit()
+        conn.close()
+
+    def set_digest_opt_in(self, user_id: int, opt_in: bool) -> None:
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+            (user_id,),
+        )
+        cur.execute(
+            "UPDATE users SET digest_opt_in=? WHERE user_id=?",
+            (1 if opt_in else 0, user_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_opted_in_users(self) -> list[int]:
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users WHERE digest_opt_in=1")
+        rows = cur.fetchall()
+        conn.close()
+        return [row[0] for row in rows]
 
     def set_last_query(self, user_id: int, query: str) -> None:
         conn = self._connect()
