@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -71,6 +72,9 @@ class FreshnessService:
         self.digest_ttl = timedelta(hours=max(1, digest_ttl_hours))
         self.opportunity_ttl = timedelta(hours=max(1, opportunity_ttl_hours))
         self.search_ttl = timedelta(hours=max(1, search_ttl_hours))
+        self._snapshot_cache: FreshnessSnapshot | None = None
+        self._snapshot_cache_at: float = 0.0
+        self._snapshot_cache_ttl_seconds: float = 30.0
         init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -79,6 +83,10 @@ class FreshnessService:
         return conn
 
     def get_status_snapshot(self) -> FreshnessSnapshot:
+        now = time.monotonic()
+        if self._snapshot_cache is not None and (now - self._snapshot_cache_at) < self._snapshot_cache_ttl_seconds:
+            return self._snapshot_cache
+
         conn = self._connect()
         try:
             cur = conn.cursor()
@@ -133,7 +141,7 @@ class FreshnessService:
             )
             last_digest_at = _parse_iso(scalar("SELECT MAX(created_at) FROM digests;"))
 
-            return FreshnessSnapshot(
+            snapshot = FreshnessSnapshot(
                 raw_count=raw_count,
                 unprocessed_raw_count=unprocessed_raw_count,
                 unanalyzed_processed_count=unanalyzed_processed_count,
@@ -145,6 +153,9 @@ class FreshnessService:
                 last_opportunity_update_at=last_opportunity_update_at,
                 last_digest_at=last_digest_at,
             )
+            self._snapshot_cache = snapshot
+            self._snapshot_cache_at = now
+            return snapshot
         finally:
             conn.close()
 
