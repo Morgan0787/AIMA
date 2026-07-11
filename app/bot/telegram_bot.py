@@ -22,6 +22,7 @@ from telegram.ext import (
 )
 
 from app.memory.user_memory import UserMemory
+from app.opportunity.lifecycle import parse_deadline_date
 from app.search.search_engine import SearchResult
 from app.services import (
     DigestService,
@@ -254,7 +255,9 @@ def _build_result_line(
         lines.append(f"  Тип: {item.category}")
     lines.append(f"  Источник: {item.channel_username}")
     if include_deadline and item.deadline_text:
-        lines.append(f"  Дедлайн: {_compact(item.deadline_text, 80)}")
+        has_valid_deadline = bool(item.deadline_iso) or parse_deadline_date(item.deadline_text) is not None
+        if has_valid_deadline:
+            lines.append(f"  Дедлайн: {_compact(item.deadline_text, 80)}")
     if include_action and item.action_hint:
         lines.append(f"  Действие: {_compact(item.action_hint, 110)}")
     return "\n".join(lines)

@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from ..opportunity.lifecycle import assess_opportunity_lifecycle
+from ..opportunity.lifecycle import assess_opportunity_lifecycle, parse_deadline_date
 
 
 MONTHS = {
@@ -198,68 +198,13 @@ class SearchEngine:
             except ValueError:
                 pass
 
-        text = (deadline_text or "").lower().strip()
+        text = (deadline_text or "").strip()
         if not text:
             return None
 
-        now = datetime.now(UTC)
-
-        m = re.search(r"(\d{1,2})\s*[-\u2013\u2014]\s*(\d{1,2})\s+([\u0400-\u04FFA-Za-z]+)(?:\s+(\d{4}))?", text)
-        if m:
-            day = int(m.group(1))
-            month_word = m.group(3).lower()
-            year = int(m.group(4) or now.year)
-            month = None
-            for key, value in MONTHS.items():
-                if month_word.startswith(key):
-                    month = value
-                    break
-            if month is not None:
-                try:
-                    dt = datetime(year, month, day, tzinfo=UTC)
-                    if not m.group(4) and dt < now.replace(hour=0, minute=0, second=0, microsecond=0):
-                        dt = datetime(year + 1, month, day, tzinfo=UTC)
-                    return dt
-                except ValueError:
-                    return None
-
-        for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%d.%m.%Y", "%d-%m-%Y", "%d/%m/%Y"):
-            try:
-                return datetime.strptime(text, fmt).replace(tzinfo=UTC)
-            except ValueError:
-                pass
-
-        m = re.search(r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?", text)
-        if m:
-            day = int(m.group(1))
-            month = int(m.group(2))
-            year = int(m.group(3) or now.year)
-            if year < 100:
-                year += 2000
-            try:
-                return datetime(year, month, day, tzinfo=UTC)
-            except ValueError:
-                return None
-
-        m = re.search(r"(\d{1,2})\s+([А-Яа-яA-Za-z]+)(?:\s+(\d{4}))?", text)
-        if m:
-            day = int(m.group(1))
-            month_word = m.group(2).lower()
-            year = int(m.group(3) or now.year)
-            month = None
-            for key, value in MONTHS.items():
-                if month_word.startswith(key):
-                    month = value
-                    break
-            if month is not None:
-                try:
-                    dt = datetime(year, month, day, tzinfo=UTC)
-                    if not m.group(3) and dt < now.replace(hour=0, minute=0, second=0, microsecond=0):
-                        dt = datetime(year + 1, month, day, tzinfo=UTC)
-                    return dt
-                except ValueError:
-                    return None
-        return None
+        # Delegate to the shared, already-fixed parser so "24/7"-style phrases
+        # and other non-deadlines are rejected consistently everywhere.
+        return parse_deadline_date(text, datetime.now(UTC))
 
     def _row_to_result(self, row: sqlite3.Row) -> SearchResult:
         metadata = self._safe_json(row["metadata_json"]) if "metadata_json" in row.keys() else {}
