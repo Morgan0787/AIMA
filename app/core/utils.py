@@ -29,3 +29,23 @@ def ensure_directory(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
 
+
+def truncate_at_word(text: str, max_len: int) -> str:
+    """
+    Truncate ``text`` so it does not exceed ``max_len`` characters, cutting only
+    at a word boundary (the last space before ``max_len``). Appends "…" when
+    truncation actually occurs. Never cuts a word in half.
+    """
+    if text is None:
+        return ""
+    text = str(text)
+    if len(text) <= max_len:
+        return text
+    if max_len <= 0:
+        return "…"
+    cut = text[:max_len]
+    last_space = cut.rfind(" ")
+    if last_space > 0:
+        cut = cut[:last_space]
+    return cut.rstrip() + "…"
+

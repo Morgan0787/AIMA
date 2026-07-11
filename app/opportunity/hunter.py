@@ -17,6 +17,7 @@ from ..core.text_similarity import (
     build_signature,
     signature_similarity,
 )
+from ..core.utils import truncate_at_word
 from ..opportunity.lifecycle import assess_opportunity_lifecycle, parse_deadline_date
 from ..storage.repository import Repository
 
@@ -76,10 +77,13 @@ PAST_EVENT_MARKERS = [
     "итоги",
 ]
 
-CTA_KEYWORDS = [
+# Real calls to action. Topic words like "хакатон"/"конкурс"/"вакансия" are
+# intentionally NOT here — they are handled by type-inference keyword lists
+# (OPEN_CALL_KEYWORDS, JOB_STRONG_KEYWORDS, etc.) and must not make a purely
+# informational past-event announcement look like it has a CTA.
+ACTION_PHRASES = [
     "подать заявку",
     "подача заявок",
-    "заявки",
     "прием заявок",
     "зарегистрироваться",
     "регистрация",
@@ -88,13 +92,7 @@ CTA_KEYWORDS = [
     "deadline",
     "дедлайн",
     "отправить резюме",
-    "вакансия",
-    "стажировка",
-    "набор",
     "open call",
-    "конкурс",
-    "hackathon",
-    "хакатон",
 ]
 
 JOB_STRONG_KEYWORDS = [
@@ -196,7 +194,7 @@ class OpportunityHunter:
 
     def _has_meaningful_cta(self, text: str) -> bool:
         lower = self._normalize_text(text).lower()
-        return any(k in lower for k in CTA_KEYWORDS)
+        return any(k in lower for k in ACTION_PHRASES)
 
     def _looks_like_sale_or_ticketed_event(self, text: str) -> bool:
         lower = self._normalize_text(text).lower()
@@ -501,12 +499,12 @@ class OpportunityHunter:
                 processed_message_id=int(row["processed_message_id"]),
                 raw_message_id=int(row["raw_message_id"]),
                 opportunity_type=opportunity_type,
-                title=summary[:180],
-                summary=summary[:220],
+                title=truncate_at_word(summary, 180),
+                summary=truncate_at_word(summary, 220),
                 channel_username=row.get("channel_username"),
                 post_link=row.get("post_link"),
                 message_date=row.get("message_date"),
-                deadline_text=deadline_text[:120],
+                deadline_text=truncate_at_word(deadline_text, 120),
                 status=status,
                 score=score,
                 confidence_score=confidence_score,
